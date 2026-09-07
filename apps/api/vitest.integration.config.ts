@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import swc from 'unplugin-swc';
 
 /**
  * Integration suite: runs against the REAL databases in docker-compose.test.yml.
@@ -10,10 +11,15 @@ import { defineConfig } from 'vitest/config';
  * (which has no config and uses vitest's default `*.test.ts` glob) never picks
  * these up and never needs Docker.
  *
+ * Compiled with SWC rather than vitest's default esbuild: Nest resolves
+ * constructor dependencies from `emitDecoratorMetadata`, which esbuild does
+ * not emit. Without this every injected dependency arrives as undefined.
+ *
  * Single-threaded and serial: these tests create replication slots, hold binlog
  * readers open and write to shared tables, so parallel files would interfere.
  */
 export default defineConfig({
+  plugins: [swc.vite({ module: { type: 'es6' } })],
   test: {
     include: ['test/integration/**/*.itest.ts'],
     globalSetup: ['test/integration/global-setup.ts'],
