@@ -26,6 +26,8 @@ export interface BenchSuite {
 
 export interface BenchReport {
   generatedAt: string;
+  /** the settings that produced these figures */
+  configuration?: Record<string, string>;
   disclaimer: string;
   environment: Record<string, string>;
   suites: BenchSuite[];

@@ -73,6 +73,25 @@ export default function BenchmarksPage() {
 
             <section className="mt-10">
               <h2 className="text-xl font-semibold tracking-tight">
+                The configuration
+              </h2>
+              <p className="mt-2 text-sm text-muted-foreground">
+                The shipped defaults — these are not tuned for the benchmark.
+                Read from the running configuration, so this cannot claim
+                settings the run did not use.
+              </p>
+              <dl className="mt-4 grid gap-x-8 gap-y-2 text-sm sm:grid-cols-2">
+                {Object.entries(report.configuration ?? {}).map(([k, v]) => (
+                  <div key={k} className="flex gap-2 border-b py-2">
+                    <dt className="w-40 shrink-0 text-muted-foreground">{k}</dt>
+                    <dd className="min-w-0 break-words">{v}</dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+
+            <section className="mt-10">
+              <h2 className="text-xl font-semibold tracking-tight">
                 The machine
               </h2>
               <p className="mt-2 text-sm text-muted-foreground">
