@@ -124,6 +124,30 @@ async function engineVersions(): Promise<Record<string, string>> {
   return out;
 }
 
+/**
+ * What else was running. A benchmark shares the machine with whatever else is
+ * up, and containers outside the test stack compete for the same CPU and the
+ * same Docker VM memory — enough to halve a result. Recording it means a
+ * published number can be read in context instead of taken on trust.
+ */
+async function coTenants(): Promise<string> {
+  try {
+    const { stdout } = await exec('docker', [
+      'stats',
+      '--no-stream',
+      '--format',
+      '{{.Name}}',
+    ]);
+    const names = stdout.trim().split('\n').filter(Boolean);
+    const others = names.filter((n) => !n.startsWith('syncle-test-'));
+    return others.length === 0
+      ? 'none — the test stack had the machine to itself'
+      : `${others.length} other container(s) were also running`;
+  } catch {
+    return 'unknown';
+  }
+}
+
 export async function captureEnvironment(): Promise<Record<string, string>> {
   const cores = cpus();
   return {
@@ -134,6 +158,7 @@ export async function captureEnvironment(): Promise<Record<string, string>> {
     Node: process.version,
     ...(await engineVersions()),
     Databases: 'containerised, same machine (docker-compose.test.yml)',
+    'Sharing the machine': await coTenants(),
   };
 }
 

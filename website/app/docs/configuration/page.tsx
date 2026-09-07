@@ -204,12 +204,26 @@ export default function Page() {
                 <code>SYNCLE_CDC_BATCH_SIZE</code>
               </td>
               <td>
-                <code>200</code>
+                <code>100000</code>
               </td>
               <td>
                 Rows per CDC delivery to a database destination. Database
                 destinations only — HTTP keeps the bridge&apos;s own batch
-                size.
+                size. The default is the measured peak; a larger batch buys
+                nothing and lengthens what a crash has to replay.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>SYNCLE_CDC_BATCH_BYTES</code>
+              </td>
+              <td>
+                <code>67108864</code>
+              </td>
+              <td>
+                Byte ceiling for one batch. A row cap alone is unsafe, since
+                100,000 wide rows could be gigabytes — the row size is
+                estimated once per batch and whichever limit binds first wins.
               </td>
             </tr>
             <tr>

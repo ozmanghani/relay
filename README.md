@@ -395,7 +395,8 @@ Env files are created automatically on first run from the committed
 | `REDIS_URL`                   | api   | Redis backing the bridge-job queue           |
 | `SYNCLE_MASTER_KEY`       | api   | base64 32-byte key for secret encryption     |
 | `SYNCLE_JOB_CONCURRENCY` | api   | How many bridge jobs may execute in parallel |
-| `SYNCLE_CDC_BATCH_SIZE`  | api   | Rows per CDC delivery to a database destination (default `200`) |
+| `SYNCLE_CDC_BATCH_SIZE`  | api   | Rows per CDC delivery to a database destination (default `100000`) |
+| `SYNCLE_CDC_BATCH_BYTES` | api   | Byte ceiling for one batch, so wide rows flush early (default `67108864`) |
 | `SYNCLE_CDC_LINGER_MS`   | api   | How long a partial CDC batch waits before it is sent (default `50`) |
 | `SYNCLE_CDC_SPOOL`       | api   | `on` to spool changes through Redis before writing (default off) |
 | `SYNCLE_CDC_SPOOL_MAX`   | api   | Unwritten changes held in the spool before the reader is throttled (default `50000`) |

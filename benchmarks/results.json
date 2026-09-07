@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-07T09:17:43.760Z",
+  "generatedAt": "2026-09-07T10:50:44.094Z",
   "disclaimer": "Measured on a single local machine: Syncle, both databases and Redis all run on the same host, in containers, with no network between them. Real deployments put a network in that path, and against a managed or remote database latency — not the database — is usually what sets the pace, so expect lower absolute numbers there. These runs are useful for comparing code paths against each other, not for predicting your production ceiling. Every figure is measured; none is estimated, extrapolated or rounded up.",
   "environment": {
     "Platform": "darwin 25.5.0 (arm64)",
@@ -10,7 +10,8 @@
     "PostgreSQL": "16.15",
     "MySQL": "8.0.46",
     "Redis": "7.4.11",
-    "Databases": "containerised, same machine (docker-compose.test.yml)"
+    "Databases": "containerised, same machine (docker-compose.test.yml)",
+    "Sharing the machine": "none — the test stack had the machine to itself"
   },
   "suites": [
     {
@@ -21,76 +22,76 @@
         {
           "scenario": "PostgreSQL → PostgreSQL · one delivery per row",
           "rows": 20000,
-          "ms": 69386,
-          "rowsPerSec": 288,
+          "ms": 62557,
+          "rowsPerSec": 320,
           "detail": {
             "verified": "20000 rows, exactly once",
-            "syncle cpu (peak / avg)": "146% / 33%",
-            "syncle memory (peak)": "153 MB",
-            "pg cpu / memory (peak)": "22% / 1225 MB"
+            "syncle cpu (peak / avg)": "140% / 34%",
+            "syncle memory (peak)": "157 MB",
+            "pg cpu / memory (peak)": "21% / 1251 MB"
           }
         },
         {
           "scenario": "PostgreSQL → PostgreSQL · batched",
           "rows": 1000000,
-          "ms": 13153,
-          "rowsPerSec": 76028,
+          "ms": 17936,
+          "rowsPerSec": 55754,
           "detail": {
             "verified": "1000000 rows, exactly once",
-            "syncle cpu (peak / avg)": "200% / 36%",
-            "syncle memory (peak)": "228 MB",
-            "pg cpu / memory (peak)": "123% / 1354 MB"
+            "syncle cpu (peak / avg)": "226% / 24%",
+            "syncle memory (peak)": "237 MB",
+            "pg cpu / memory (peak)": "154% / 1378 MB"
           }
         },
         {
           "scenario": "PostgreSQL → MySQL · batched",
           "rows": 1000000,
-          "ms": 9133,
-          "rowsPerSec": 109493,
+          "ms": 11028,
+          "rowsPerSec": 90678,
           "detail": {
             "verified": "1000000 rows, exactly once",
-            "syncle cpu (peak / avg)": "220% / 62%",
-            "syncle memory (peak)": "276 MB",
-            "pg cpu / memory (peak)": "92% / 1419 MB",
-            "mysql cpu / memory (peak)": "66% / 1340 MB"
+            "syncle cpu (peak / avg)": "225% / 45%",
+            "syncle memory (peak)": "248 MB",
+            "pg cpu / memory (peak)": "124% / 1457 MB",
+            "mysql cpu / memory (peak)": "82% / 1918 MB"
           }
         },
         {
           "scenario": "MySQL → PostgreSQL · batched",
           "rows": 1000000,
-          "ms": 12369,
-          "rowsPerSec": 80847,
+          "ms": 11943,
+          "rowsPerSec": 83731,
           "detail": {
             "verified": "1000000 rows, exactly once",
-            "syncle cpu (peak / avg)": "236% / 40%",
-            "syncle memory (peak)": "300 MB",
-            "pg cpu / memory (peak)": "133% / 1444 MB",
-            "mysql cpu / memory (peak)": "106% / 1306 MB"
+            "syncle cpu (peak / avg)": "322% / 31%",
+            "syncle memory (peak)": "350 MB",
+            "pg cpu / memory (peak)": "112% / 1511 MB",
+            "mysql cpu / memory (peak)": "90% / 2052 MB"
           }
         },
         {
           "scenario": "PostgreSQL → MongoDB · batched",
           "rows": 1000000,
-          "ms": 54409,
-          "rowsPerSec": 18379,
+          "ms": 36905,
+          "rowsPerSec": 27097,
           "detail": {
             "verified": "1000000 rows, exactly once",
-            "syncle cpu (peak / avg)": "217% / 13%",
-            "syncle memory (peak)": "245 MB",
-            "pg cpu / memory (peak)": "22% / 1516 MB"
+            "syncle cpu (peak / avg)": "253% / 12%",
+            "syncle memory (peak)": "281 MB",
+            "pg cpu / memory (peak)": "35% / 1579 MB"
           }
         },
         {
           "scenario": "PostgreSQL → PostgreSQL · batched + durable spool",
           "rows": 1000000,
-          "ms": 21659,
-          "rowsPerSec": 46170,
+          "ms": 19549,
+          "rowsPerSec": 51154,
           "detail": {
             "verified": "1000000 rows, exactly once",
-            "syncle cpu (peak / avg)": "265% / 59%",
-            "syncle memory (peak)": "381 MB",
-            "pg cpu / memory (peak)": "175% / 1341 MB",
-            "peak spool depth": 65015
+            "syncle cpu (peak / avg)": "259% / 55%",
+            "syncle memory (peak)": "454 MB",
+            "pg cpu / memory (peak)": "147% / 1357 MB",
+            "peak spool depth": 69629
           }
         }
       ]
@@ -103,22 +104,23 @@
         {
           "scenario": "PostgreSQL · upsert",
           "rows": 1000000,
-          "ms": 6756,
-          "rowsPerSec": 148017,
+          "ms": 9311,
+          "rowsPerSec": 107400,
           "detail": {
-            "syncle cpu (peak / avg)": "69% / 9%",
-            "syncle memory (peak)": "138 MB",
-            "pg cpu / memory (peak)": "86% / 1241 MB"
+            "syncle cpu (peak / avg)": "131% / 6%",
+            "syncle memory (peak)": "129 MB",
+            "pg cpu / memory (peak)": "94% / 1292 MB"
           }
         },
         {
           "scenario": "MySQL · upsert",
           "rows": 1000000,
-          "ms": 3296,
-          "rowsPerSec": 303398,
+          "ms": 4143,
+          "rowsPerSec": 241371,
           "detail": {
-            "syncle cpu (peak / avg)": "98% / 23%",
-            "syncle memory (peak)": "185 MB"
+            "syncle cpu (peak / avg)": "116% / 21%",
+            "syncle memory (peak)": "175 MB",
+            "mysql cpu / memory (peak)": "126% / 1904 MB"
           }
         }
       ]
