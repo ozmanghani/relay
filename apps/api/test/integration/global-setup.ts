@@ -6,9 +6,12 @@
  * waits for every engine to accept connections, so a slow container start
  * surfaces as a clear message instead of a pile of connection-refused failures.
  */
+import { execFileSync } from 'node:child_process';
+import { Client } from 'pg';
 import { MongoClient } from 'mongodb';
 import { bootstrapDrivers, createAdapter } from '@syncle/core/adapters';
 import { TEST_CONNECTIONS } from './harness';
+import { META_DB_URL, applyTestEnv } from './env';
 
 const MONGO_DIRECT = 'mongodb://127.0.0.1:57017/?directConnection=true';
 
@@ -71,8 +74,41 @@ async function waitForEngine(name: string): Promise<void> {
   );
 }
 
+/**
+ * The app's own metadata store. Created here rather than by compose so the
+ * schema is migrated with the real Prisma migrations — the same ones production
+ * runs — instead of a hand-written approximation.
+ */
+async function prepareMetadataDatabase(): Promise<void> {
+  const admin = new Client({
+    host: '127.0.0.1',
+    port: 55432,
+    user: 'syncle',
+    password: 'syncle',
+    database: 'syncle_test',
+  });
+  await admin.connect();
+  try {
+    const exists = await admin.query(
+      'select 1 from pg_database where datname = $1',
+      ['syncle_meta'],
+    );
+    if (exists.rowCount === 0) await admin.query('create database syncle_meta');
+  } finally {
+    await admin.end().catch(() => undefined);
+  }
+
+  execFileSync('npx', ['prisma', 'migrate', 'deploy'], {
+    cwd: new URL('../..', import.meta.url).pathname,
+    env: { ...process.env, DATABASE_URL: META_DB_URL },
+    stdio: 'pipe',
+  });
+}
+
 export async function setup(): Promise<void> {
+  applyTestEnv();
   bootstrapDrivers();
   await initReplicaSet();
   for (const name of Object.keys(TEST_CONNECTIONS)) await waitForEngine(name);
+  await prepareMetadataDatabase();
 }
