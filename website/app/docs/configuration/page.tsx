@@ -201,6 +201,55 @@ export default function Page() {
             </tr>
             <tr>
               <td>
+                <code>SYNCLE_CDC_BATCH_SIZE</code>
+              </td>
+              <td>
+                <code>200</code>
+              </td>
+              <td>
+                Rows per CDC delivery to a database destination. Database
+                destinations only — HTTP keeps the bridge&apos;s own batch
+                size.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>SYNCLE_CDC_LINGER_MS</code>
+              </td>
+              <td>
+                <code>50</code>
+              </td>
+              <td>
+                How long a partial CDC batch waits for more changes before it
+                is sent anyway.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>SYNCLE_CDC_SPOOL</code>
+              </td>
+              <td>
+                <em>off</em>
+              </td>
+              <td>
+                <code>on</code> spools changes through Redis before writing, so
+                the source is acknowledged without waiting for the destination.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>SYNCLE_CDC_SPOOL_MAX</code>
+              </td>
+              <td>
+                <code>50000</code>
+              </td>
+              <td>
+                Unwritten changes held in the spool before the reader is
+                throttled.
+              </td>
+            </tr>
+            <tr>
+              <td>
                 <code>SYNCLE_MAX_QUERY_ROWS</code>
               </td>
               <td>

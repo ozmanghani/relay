@@ -39,12 +39,33 @@ interface ZongjiConn {
 /** row events we care about. `rotate`/`tablemap` are needed for bookkeeping */
 const ROW_EVENTS = new Set(['writerows', 'updaterows', 'deleterows']);
 
+/** how long start() waits for the binlog reader to report it is positioned */
+const READY_TIMEOUT_MS = 10_000;
+
 /**
  * byte offset where a binlog event STARTS. zongji's `size` is the payload
  * length only — the on-disk event_length that `nextPosition` advances by also
  * counts the 19-byte common header, plus a 4-byte CRC32 when the server runs
  * with `binlog_checksum` (the default on modern MySQL).
  */
+/**
+ * A GTID_LOG event carries the originating server's UUID as 16 raw bytes plus
+ * the transaction number, which together are the transaction's GTID. Recorded
+ * on the cursor so an operator can see exactly which transaction a stream sits
+ * at, and so a resume can tell it is talking to the same server.
+ */
+export function gtidFromEvent(evt: {
+  serverId?: unknown;
+  transactionRange?: unknown;
+}): string | null {
+  const sid = evt.serverId;
+  if (!Buffer.isBuffer(sid) || sid.length !== 16) return null;
+  const h = sid.toString('hex');
+  const uuid = `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+  const range = Number(evt.transactionRange);
+  return Number.isFinite(range) ? `${uuid}:${range}` : uuid;
+}
+
 export function binlogEventStart(
   evt: { nextPosition: number; size: number },
   useChecksum: boolean,
@@ -76,7 +97,66 @@ export class MysqlCdcProvider implements CdcProvider {
   }
 
   /**
-   * parse a cursor into [file, pos, rowIdx, isStart]. three formats:
+   * The binlog coordinates a cursor carries are meaningful ONLY on the server
+   * that produced them: after a failover the new primary's files and offsets
+   * are unrelated, so resuming from them reads arbitrary data. Cursors
+   * therefore record which server issued them.
+   *
+   * Note this is a guard, not GTID positioning. The binlog client sends
+   * COM_BINLOG_DUMP (file + position) and has no COM_BINLOG_DUMP_GTID, so a
+   * stream cannot be *resumed* from a GTID set. What this does is refuse to
+   * resume against a different server instead of silently misreading it.
+   */
+  private cursorServer(c: string): string | null {
+    if (!c.startsWith('{')) return null;
+    try {
+      const o = JSON.parse(c) as { u?: string };
+      return o.u ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** the GTID recorded with a cursor, for operator visibility */
+  private cursorGtid(c: string): string | null {
+    if (!c.startsWith('{')) return null;
+    try {
+      const o = JSON.parse(c) as { g?: string };
+      return o.g ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** build a cursor, carrying server identity when it is known */
+  private makeCursor(args: {
+    file: string;
+    pos: number;
+    row: number;
+    isStart: boolean;
+    serverUuid: string | null;
+    gtid: string | null;
+  }): string {
+    const { file, pos, row, isStart, serverUuid, gtid } = args;
+    // without a known server the legacy compact form stays, so nothing changes
+    // for engines/versions that do not expose @@server_uuid
+    if (!serverUuid) {
+      return isStart ? `${file}:${pos}:${row}:s` : `${file}:${pos}:${row}`;
+    }
+    return JSON.stringify({
+      f: file,
+      p: pos,
+      r: row,
+      s: isStart,
+      u: serverUuid,
+      ...(gtid ? { g: gtid } : {}),
+    });
+  }
+
+  /**
+   * parse a cursor into [file, pos, rowIdx, isStart]. four formats:
+   *  - a JSON object {f,p,r,s,u,g} (current) — as below, plus the identity of
+   *    the server that issued it
    *  - "file:pos:rowIdx:s" (current) — pos is the START of the statement's
    *    tablemap event, so a resume re-enters the statement and the row-index
    *    watermark drops the already-delivered prefix
@@ -86,6 +166,14 @@ export class MysqlCdcProvider implements CdcProvider {
    *    next multi-row event still counts as "after" the old watermark
    */
   private splitCursor(c: string): [string, number, number, boolean] {
+    if (c.startsWith('{')) {
+      try {
+        const o = JSON.parse(c) as { f?: string; p?: number; r?: number; s?: boolean };
+        return [o.f ?? '', Number(o.p ?? 0), Number(o.r ?? -1), o.s === true];
+      } catch {
+        /* fall through to the legacy parser */
+      }
+    }
     let rest = c;
     let isStart = false;
     if (rest.endsWith(':s')) {
@@ -134,6 +222,28 @@ export class MysqlCdcProvider implements CdcProvider {
     for (let i = 0; i < bridgeId.length; i++) h = (h * 31 + bridgeId.charCodeAt(i)) >>> 0;
     // keep well clear of the common server_id=1 and inside a safe 32-bit range
     return (h % 2_000_000_000) + 1000;
+  }
+
+  /**
+   * `@@server_uuid` identifies the server instance. It is what makes a stored
+   * binlog coordinate safe to reuse: same uuid, same file/position meaning.
+   * Returns null when the server does not expose it, in which case cursors
+   * keep the legacy compact form and no guard is applied.
+   */
+  private async serverUuid(
+    connectionId: string,
+    database?: string,
+  ): Promise<string | null> {
+    try {
+      const res = await this.pool.withAdapter(connectionId, database, (a) =>
+        a.query('SELECT @@server_uuid AS uuid'),
+      );
+      const row = res.rows[0] as { uuid?: unknown } | undefined;
+      const uuid = row?.uuid;
+      return typeof uuid === 'string' && uuid.length > 0 ? uuid : null;
+    } catch {
+      return null;
+    }
   }
 
   /* ----- readiness ----- */
@@ -228,6 +338,25 @@ export class MysqlCdcProvider implements CdcProvider {
     // resume bookkeeping: tracks the last SAFE binlog position so both the
     // initial start AND every reconnect resume exactly where we left off
     const resume = fromCursor ? this.splitCursor(fromCursor) : null;
+
+    // binlog coordinates only mean anything on the server that issued them.
+    // After a failover the new primary's files and offsets are unrelated, so
+    // resuming from the old ones reads arbitrary data — fail loudly instead.
+    const serverUuid = await this.serverUuid(src.connectionId, db);
+    if (fromCursor) {
+      const previous = this.cursorServer(fromCursor);
+      if (previous && serverUuid && previous !== serverUuid) {
+        throw new Error(
+          `This bridge's saved binlog position came from MySQL server ${previous}, ` +
+            `but the connection now reaches ${serverUuid}. Binlog file and position ` +
+            `are only valid on the server that produced them, so resuming here would ` +
+            `read the wrong data. Reset the bridge to start from the current position.`,
+        );
+      }
+    }
+    // the GTID of the transaction being decoded, recorded onto each cursor
+    let lastGtid: string | null = fromCursor ? this.cursorGtid(fromCursor) : null;
+
     let binlogName = resume?.[0] ?? '';
     let position = resume?.[1] ?? 0;
     // the statement group currently being decoded: `groupStart` is the byte
@@ -241,6 +370,11 @@ export class MysqlCdcProvider implements CdcProvider {
 
     const onEvent = async (evt: BinLogEvent): Promise<void> => {
       const name = evt.getEventName();
+      if (name === 'gtidlog') {
+        // precedes the transaction's row events, so it labels what follows
+        lastGtid = gtidFromEvent(evt as unknown as Record<string, unknown>) ?? lastGtid;
+        return;
+      }
       if (name === 'rotate') {
         // rotate tells us the current binlog filename (incl. the one at startup)
         const next = (evt as { binlogName?: string }).binlogName;
@@ -306,9 +440,14 @@ export class MysqlCdcProvider implements CdcProvider {
           const idx = groupRow++;
           // defensive fallback: a row event with no seen tablemap (shouldn't
           // happen) keeps the legacy end-position cursor format
-          const cursor = startKnown
-            ? `${binlogName}:${groupStart}:${idx}:s`
-            : `${binlogName}:${rowEvt.nextPosition}:${i}`;
+          const cursor = this.makeCursor({
+            file: binlogName,
+            pos: startKnown ? groupStart : rowEvt.nextPosition,
+            row: startKnown ? idx : i,
+            isStart: startKnown,
+            serverUuid,
+            gtid: lastGtid,
+          });
           await handlers.onChange({ op, row, cursor });
         }
         // the resume point stays at the group's tablemap: the statement may
@@ -320,10 +459,22 @@ export class MysqlCdcProvider implements CdcProvider {
       }
     };
 
+    // `start()` must not return before the reader is actually positioned:
+    // with startAtEnd a row written immediately afterwards would land in the
+    // binlog ahead of the reader and be missed entirely
+    let signalReady: (() => void) | null = null;
+    const positioned = new Promise<void>((resolve) => {
+      signalReady = resolve;
+    });
+
     const startInstance = (): void => {
       if (stopped) return;
       const instance = new ZongJi({ ...connInfo, dateStrings: true });
       zongji = instance;
+      instance.on('ready', () => {
+        signalReady?.();
+        signalReady = null;
+      });
       instance.on('binlog', (evt: BinLogEvent) => {
         void onEvent(evt).catch((err) => handlers.onError(err as Error));
       });
@@ -342,7 +493,16 @@ export class MysqlCdcProvider implements CdcProvider {
       });
 
       const startOpts: Record<string, unknown> = {
-        includeEvents: ['rotate', 'tablemap', 'writerows', 'updaterows', 'deleterows'],
+        // gtidlog labels each transaction; without it in this list the
+        // events are filtered out before the handler ever sees them
+        includeEvents: [
+          'rotate',
+          'gtidlog',
+          'tablemap',
+          'writerows',
+          'updaterows',
+          'deleterows',
+        ],
         includeSchema: { [db]: [src.table] },
         serverId,
       };
@@ -361,6 +521,16 @@ export class MysqlCdcProvider implements CdcProvider {
     };
 
     startInstance();
+
+    // bounded: a server that never signals ready must not hang the start call,
+    // and the stream is still usable — it just keeps whatever it does receive
+    await Promise.race([
+      positioned,
+      new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, READY_TIMEOUT_MS);
+        t.unref?.();
+      }),
+    ]);
 
     return {
       stop: async () => {

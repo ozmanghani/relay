@@ -1,10 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import type { AdapterPoolService } from '../../../connections/adapter-pool.service';
-import { MysqlCdcProvider, binlogEventStart } from './mysql-cdc.provider';
+import {
+  MysqlCdcProvider,
+  binlogEventStart,
+  gtidFromEvent,
+} from './mysql-cdc.provider';
 
 // cursorAfter/splitCursor are pure, the pool is only used by readiness()
 const provider = new MysqlCdcProvider(null as unknown as AdapterPoolService);
 const split = (c: string) => provider['splitCursor'](c);
+const make = (a: Parameters<MysqlCdcProvider['makeCursor']>[0]) =>
+  provider['makeCursor'](a);
+const serverOf = (c: string) => provider['cursorServer'](c);
 
 describe('splitCursor', () => {
   it('parses the current start-format cursor "file:pos:row:s"', () => {
@@ -76,5 +83,76 @@ describe('binlogEventStart (resume-position math)', () => {
   it('accounts for the 4-byte CRC32 when binlog_checksum is on', () => {
     // zongji strips the checksum from `size`, but next_position includes it
     expect(binlogEventStart({ nextPosition: 564, size: 41 }, true)).toBe(500);
+  });
+});
+
+describe('server-identity cursors', () => {
+  const base = { file: 'binlog.000007', pos: 900, row: 2, isStart: true };
+
+  it('keeps the compact legacy form when the server is unknown', () => {
+    expect(make({ ...base, serverUuid: null, gtid: null })).toBe(
+      'binlog.000007:900:2:s',
+    );
+  });
+
+  it('emits JSON carrying the server uuid when it is known', () => {
+    const c = make({ ...base, serverUuid: 'uuid-a', gtid: 'uuid-a:12' });
+    expect(serverOf(c)).toBe('uuid-a');
+    expect(provider['cursorGtid'](c)).toBe('uuid-a:12');
+  });
+
+  it('parses back to the same coordinates it was built from', () => {
+    const c = make({ ...base, serverUuid: 'uuid-a', gtid: null });
+    expect(split(c)).toEqual(['binlog.000007', 900, 2, true]);
+  });
+
+  it('reports no server for a legacy cursor', () => {
+    expect(serverOf('binlog.000007:900:2:s')).toBeNull();
+  });
+
+  it('survives a malformed JSON cursor without throwing', () => {
+    expect(serverOf('{not json')).toBeNull();
+    expect(split('{not json')).toEqual(['{not json', 0, -1, false]);
+  });
+
+  it('orders identically whether a cursor is JSON or legacy', () => {
+    // a stream upgraded mid-flight compares old watermarks against new cursors
+    const modern = make({
+      file: 'b.000001',
+      pos: 200,
+      row: 0,
+      isStart: true,
+      serverUuid: 'u1',
+      gtid: null,
+    });
+    expect(provider.cursorAfter(modern, 'b.000001:100:9:s')).toBe(true);
+    expect(provider.cursorAfter('b.000001:300:0:s', modern)).toBe(true);
+    expect(provider.cursorAfter(modern, 'b.000001:300:0:s')).toBe(false);
+    // and against another JSON cursor
+    const later = make({
+      file: 'b.000001',
+      pos: 400,
+      row: 0,
+      isStart: true,
+      serverUuid: 'u1',
+      gtid: null,
+    });
+    expect(provider.cursorAfter(later, modern)).toBe(true);
+    expect(provider.cursorAfter(modern, later)).toBe(false);
+  });
+});
+
+describe('gtidFromEvent', () => {
+  it('formats the 16-byte server id and transaction number as a GTID', () => {
+    const sid = Buffer.from('3E11FA47710C4A4EA9B4E75E1B1B2B3C', 'hex');
+    expect(gtidFromEvent({ serverId: sid, transactionRange: 42 })).toBe(
+      '3e11fa47-710c-4a4e-a9b4-e75e1b1b2b3c:42',
+    );
+  });
+
+  it('returns null when the server id is not a 16-byte buffer', () => {
+    expect(gtidFromEvent({ serverId: 'nope', transactionRange: 1 })).toBeNull();
+    expect(gtidFromEvent({ serverId: Buffer.alloc(4), transactionRange: 1 })).toBeNull();
+    expect(gtidFromEvent({})).toBeNull();
   });
 });

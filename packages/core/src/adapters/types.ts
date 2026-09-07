@@ -300,6 +300,44 @@ export interface UpsertRowParams {
 }
 
 /* -------------------------------------------------------------------------- */
+/* batched writes                                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Batched variants of the single-row writes. A sink handling a stream of
+ * changes would otherwise pay a full round trip per row, which dominates
+ * throughput once the database is anywhere but localhost.
+ *
+ * These are OPTIONAL on {@link DatabaseAdapter}: an engine that cannot express
+ * a set-based write simply omits them and callers fall back to looping the
+ * single-row methods. Callers MUST therefore guard with
+ * `adapter.upsertRows?.(...)` rather than assuming availability.
+ *
+ * Rows are NOT required to share a column set — implementations group by the
+ * columns actually present, since a change stream can emit sparse rows.
+ */
+export interface InsertRowsParams {
+  schema?: string;
+  table: string;
+  rows: Array<Record<string, unknown>>;
+}
+
+export interface UpsertRowsParams {
+  schema?: string;
+  table: string;
+  rows: Array<Record<string, unknown>>;
+  /** columns that uniquely identify a row (must be a unique/primary key) */
+  keyColumns: string[];
+}
+
+export interface DeleteRowsParams {
+  schema?: string;
+  table: string;
+  /** one identity per row to remove; all must use the same key columns */
+  identities: RowIdentity[];
+}
+
+/* -------------------------------------------------------------------------- */
 /* schema management (DDL)                                                     */
 /* -------------------------------------------------------------------------- */
 
@@ -390,6 +428,11 @@ export interface DatabaseAdapter {
   deleteRow(params: DeleteRowParams): Promise<QueryResult>;
   /** insert-or-update keyed by `keyColumns`, atomic in the engine's dialect */
   upsertRow(params: UpsertRowParams): Promise<QueryResult>;
+
+  /* ----- optional set-based writes; see InsertRowsParams for the contract ----- */
+  insertRows?(params: InsertRowsParams): Promise<QueryResult>;
+  upsertRows?(params: UpsertRowsParams): Promise<QueryResult>;
+  deleteRows?(params: DeleteRowsParams): Promise<QueryResult>;
 
   /* schema management, guarded by `capabilities.ddl` / `manageDatabases` */
   createDatabase(name: string): Promise<void>;

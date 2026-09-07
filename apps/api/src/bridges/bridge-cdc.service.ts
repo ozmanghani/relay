@@ -33,17 +33,20 @@ import { randomUUID } from 'node:crypto';
 import { AdapterPoolService } from '../connections/adapter-pool.service';
 import { ConnectionStoreService } from '../connections/connection-store.service';
 import { PrismaService } from '../common/prisma.service';
+import { runtimeConfig } from '../common/runtime-config';
 import { BridgeJobService } from './bridge-job.service';
 import { BridgeStoreService } from './bridge-store.service';
 import { BridgeSinkService } from './bridge-sink.service';
 import type { ResolvedBridge } from './bridges.types';
 import {
   CDC_PROVIDERS,
+  backoffMs,
   type CdcChange,
   type CdcProvider,
   type CdcStreamHandle,
 } from './cdc/cdc-provider';
 import { rowMatchesFilters } from './cdc/filter-match';
+import { CdcSpoolService, type SpooledItem } from './cdc/cdc-spool.service';
 
 /** live runtime state for one active CDC stream */
 interface Stream {
@@ -61,6 +64,32 @@ interface Stream {
   pending: Promise<void>;
   /** the source's primary-key columns, so rowKeys stores keys, not every value */
   primaryKey: string[] | null;
+  /** changes accepted but not yet delivered; flushed as ONE delivery */
+  buffer: Buffered[];
+  /** the operation every buffered change shares; a different op forces a flush */
+  bufferOp: CdcOperation | null;
+  /** key signatures already in the buffer, so one batch never repeats a key */
+  bufferKeys: Set<string>;
+  /** linger timer, so a partial batch still leaves promptly */
+  timer: ReturnType<typeof setTimeout> | null;
+  /** rows per delivery for this bridge */
+  maxBatch: number;
+  /** the resolved bridge, so a flush needs no extra arguments */
+  bridge: ResolvedBridge;
+  /** changes go through the durable spool instead of straight to the sink */
+  spooled: boolean;
+  /** set to stop the spool consumer loop */
+  consumerStop: boolean;
+  /** the running consumer, awaited on teardown so it exits cleanly */
+  consumer: Promise<void> | null;
+}
+
+/** one change held in the pending batch */
+interface Buffered {
+  change: CdcChange;
+  row: Record<string, unknown>;
+  /** identity of the row within this batch, or null when there is no key */
+  keySig: string | null;
 }
 
 /** read the persisted resume cursor from a job's cursorJson (legacy `lsn` ok) */
@@ -87,6 +116,7 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
     private readonly pool: AdapterPoolService,
     private readonly sink: BridgeSinkService,
     private readonly jobs: BridgeJobService,
+    private readonly spool: CdcSpoolService,
     @Inject(CDC_PROVIDERS) providers: CdcProvider[],
   ) {
     for (const p of providers) this.providers.set(p.engine, p);
@@ -218,7 +248,16 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
   private async teardown(bridgeId: string): Promise<void> {
     const stream = this.streams.get(bridgeId);
     if (!stream) return;
+    // let the in-flight chain settle so a half-built batch is not abandoned
+    // mid-flush, then drop the entry so nothing new is accepted
+    await stream.pending.catch(() => undefined);
     this.streams.delete(bridgeId);
+    if (stream.timer) clearTimeout(stream.timer);
+    stream.consumerStop = true;
+    await stream.consumer?.catch(() => undefined);
+    // buffered-but-undelivered changes were never acked, so they would replay
+    // on resume anyway; flushing here just avoids the needless repeat
+    await this.flush(bridgeId, stream).catch(() => undefined);
     await stream.handle.stop().catch(() => undefined);
   }
 
@@ -245,6 +284,22 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
       watermark: startCursor,
       pending: Promise.resolve(),
       primaryKey: await this.resolvePrimaryKey(bridge),
+      buffer: [],
+      bufferOp: null,
+      bufferKeys: new Set(),
+      timer: null,
+      // a database destination may batch freely: writes are idempotent upserts
+      // keyed by column, so N-at-once is indistinguishable from N one-at-a-time.
+      // an HTTP destination must keep delivery.batchSize, because there the
+      // batch size IS the payload the receiver sees.
+      maxBatch:
+        bridge.destination.kind === 'database'
+          ? Math.max(1, runtimeConfig.cdcBatchSize)
+          : Math.max(1, bridge.delivery.batchSize),
+      bridge,
+      spooled: runtimeConfig.cdcSpool,
+      consumerStop: false,
+      consumer: null,
     };
     this.streams.set(bridgeId, stream);
 
@@ -275,6 +330,8 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
     }
     // the provider may have already begun emitting, only replace the placeholder
     stream.handle = handle;
+    // the spool consumer runs alongside the reader, draining to the destination
+    if (stream.spooled) this.startConsumer(bridgeId, stream);
   }
 
   /** the source's primary-key columns (best-effort), cached on the stream */
@@ -301,16 +358,29 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
     const stream = this.streams.get(bridgeId);
     if (!stream) return Promise.resolve();
     stream.pending = stream.pending
-      .then(() => this.processChange(bridgeId, bridge, stream, change))
+      .then(() => this.accept(bridgeId, bridge, stream, change))
       .catch((err) => {
-        // processChange handles its own failures; this only guards the chain
+        // accept() handles its own failures; this only guards the chain
         this.logger.error(`CDC change chain broke for ${bridgeId}: ${(err as Error).message}`);
       });
     return stream.pending;
   }
 
-  /** for one change: dedupe, filter, render, deliver, record, persist cursor, ack */
-  private async processChange(
+  /** identity of a row within a batch, or null when the source has no key */
+  private keySignature(stream: Stream, row: Record<string, unknown>): string | null {
+    if (!stream.primaryKey?.length) return null;
+    try {
+      return JSON.stringify(stream.primaryKey.map((c) => row[c]));
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * take one change: drop replays, handle filtered rows, otherwise add it to
+   * the pending batch and flush when the batch is complete.
+   */
+  private async accept(
     bridgeId: string,
     bridge: ResolvedBridge,
     stream: Stream,
@@ -322,6 +392,8 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
     // (durable engines replay from the last acked cursor after a reconnect)
     if (!stream.provider.cursorAfter(change.cursor, stream.watermark)) return;
 
+    const op = change.op as CdcOperation;
+
     // source filters: replay pushes them into SQL, but a CDC stream sees every
     // row of the table, so evaluate them in-process here. skipped rows still
     // advance the durable cursor (and the provider's server-side ack point) so
@@ -330,9 +402,14 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
     if (
       !stream.provider.handlesSourceFilters &&
       !rowMatchesFilters(change.row, bridge.source.filters, {
-        passMissingColumns: change.op === 'delete',
+        passMissingColumns: op === 'delete',
       })
     ) {
+      // anything already buffered is ORDERED BEFORE this change, so it has to
+      // be delivered first — otherwise advancing the cursor past it would drop
+      // those rows on a crash
+      await this.flush(bridgeId, stream);
+      if (this.streams.get(bridgeId) !== stream) return;
       stream.watermark = change.cursor;
       try {
         await this.prisma.bridgeJob.update({
@@ -346,35 +423,119 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    const keySig = this.keySignature(stream, change.row);
+
+    // two reasons a change cannot join the current batch: a different operation
+    // has no single route through the sink, and a repeated key would make one
+    // multi-row upsert touch the same row twice, which Postgres rejects outright
+    const conflicts =
+      stream.buffer.length > 0 &&
+      (stream.bufferOp !== op || (keySig !== null && stream.bufferKeys.has(keySig)));
+    if (conflicts) {
+      await this.flush(bridgeId, stream);
+      if (this.streams.get(bridgeId) !== stream) return;
+    }
+
+    stream.buffer.push({ change, row: change.row, keySig });
+    stream.bufferOp = op;
+    if (keySig !== null) stream.bufferKeys.add(keySig);
+
+    if (stream.buffer.length >= stream.maxBatch) {
+      // a full batch is delivered before this returns, so a provider that
+      // awaits onChange still feels backpressure and the buffer stays bounded
+      await this.flush(bridgeId, stream);
+      return;
+    }
+    this.scheduleFlush(bridgeId, stream);
+  }
+
+  /** flush a partial batch after a short linger, so a quiet stream is not stuck */
+  private scheduleFlush(bridgeId: string, stream: Stream): void {
+    if (stream.timer) return;
+    const timer = setTimeout(() => {
+      stream.timer = null;
+      if (this.streams.get(bridgeId) !== stream) return;
+      // queued on the same chain, so a timed flush can never interleave with
+      // a change being accepted
+      stream.pending = stream.pending
+        .then(() => this.flush(bridgeId, stream))
+        .catch((err) => {
+          this.logger.error(`CDC timed flush failed for ${bridgeId}: ${(err as Error).message}`);
+        });
+    }, Math.max(0, runtimeConfig.cdcLingerMs));
+    // a pending linger must not hold the process open
+    timer.unref?.();
+    stream.timer = timer;
+  }
+
+  /**
+   * deliver the pending batch as ONE delivery, then checkpoint once and ack
+   * once. per-row work here is what set the old throughput ceiling: a delivery,
+   * a delivery record, a cursor write and a source ack for every single row.
+   *
+   * the cursor advances only after a successful delivery, so a crash mid-batch
+   * replays that batch — absorbed by the watermark dedupe and by writes being
+   * idempotent upserts.
+   */
+  private async flush(bridgeId: string, stream: Stream): Promise<void> {
+    if (stream.timer) {
+      clearTimeout(stream.timer);
+      stream.timer = null;
+    }
+    if (stream.buffer.length === 0) return;
+
+    const items = stream.buffer;
+    const op = stream.bufferOp ?? undefined;
+    stream.buffer = [];
+    stream.bufferKeys = new Set();
+    stream.bufferOp = null;
+
+    const bridge = stream.bridge;
+    if (bridge.source.kind !== 'table') return;
+
+    const rows = items.map((i) => i.row);
+    const lastCursor = items[items.length - 1]!.change.cursor;
+
+    if (stream.spooled) {
+      await this.spoolBatch(bridgeId, stream, items, lastCursor);
+      return;
+    }
+
     const seq = stream.seq;
     const now = new Date().toISOString();
-    const rowKeys = stream.primaryKey ? stream.primaryKey.map((c) => change.row[c]) : null;
-    // key on the cursor (stable per change) so an at-least-once re-delivery after
-    // a reconnect carries the SAME Idempotency-Key for the receiver to dedupe
+    const pk = stream.primaryKey;
+    // one entry per row, matching rowCount — the same shape the batched replay
+    // path records
+    const rowKeys = pk?.length
+      ? items.map((i) => (pk.length === 1 ? i.row[pk[0]!] : pk.map((c) => i.row[c])))
+      : null;
+    // key on the batch's last cursor (stable per batch) so an at-least-once
+    // re-delivery after a reconnect carries the SAME Idempotency-Key
     const idem =
       bridge.destination.kind === 'http' && bridge.destination.idempotency
-        ? `${stream.jobId}:${change.cursor}`
+        ? `${stream.jobId}:${lastCursor}`
         : undefined;
     const signal = new AbortController().signal;
+
     try {
       // the operation drives both the {{$op}} token (HTTP) and insert/upsert vs
       // delete routing (database destinations)
       const { outcome } = await this.sink.deliver(
         bridge,
-        [change.row],
-        { table: bridge.source.table, now, startIndex: seq, op: change.op as CdcOperation },
+        rows,
+        { table: bridge.source.table, now, startIndex: seq, op },
         signal,
         idem,
       );
 
       await this.jobs.recordDelivery(
         stream.jobId,
-        { sequence: seq, rowIndex: seq, rowCount: 1, rowKeys },
+        { sequence: seq, rowIndex: seq, rowCount: rows.length, rowKeys },
         outcome,
       );
       if (outcome.status === 'failed' && bridge.delivery.onError === 'abort') {
         // stop-on-error: pause the job and stop the stream WITHOUT advancing
-        // the watermark or acking, so this change replays on the next start.
+        // the watermark or acking, so this batch replays on the next start.
         // teardown happens outside the change chain — the provider's stop()
         // may wait for in-flight handlers (i.e. this very call)
         this.logger.warn(`CDC ${bridgeId}: pausing after a failed delivery (onError=abort)`);
@@ -387,27 +548,27 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
         return;
       }
       stream.seq = seq + 1;
-      stream.watermark = change.cursor;
+      stream.watermark = lastCursor;
       await this.prisma.bridgeJob.update({
         where: { id: stream.jobId },
-        data: { cursorOffset: stream.seq, cursorJson: JSON.stringify({ cursor: change.cursor }) },
+        data: { cursorOffset: stream.seq, cursorJson: JSON.stringify({ cursor: lastCursor }) },
       });
       // the checkpoint is durable, so the provider may now advance its
       // server-side ack point (the Postgres slot's confirmed LSN). a missed
       // ack only widens the replay window the watermark dedupe absorbs
       try {
-        await stream.handle.ack?.(change.cursor);
+        await stream.handle.ack?.(lastCursor);
       } catch {
         /* best-effort by contract */
       }
     } catch (err) {
       // a transient pipeline error (Prisma/pool hiccup) must leave a trace: the
-      // event becomes a FAILED delivery row, visible in the timeline + retryable
+      // batch becomes a FAILED delivery row, visible in the timeline + retryable
       const message = err instanceof Error ? err.message : String(err);
       try {
         await this.jobs.recordDelivery(
           stream.jobId,
-          { sequence: seq, rowIndex: seq, rowCount: 1, rowKeys },
+          { sequence: seq, rowIndex: seq, rowCount: rows.length, rowKeys },
           {
             status: 'failed',
             httpStatus: null,
@@ -419,7 +580,7 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
           },
         );
         stream.seq = seq + 1;
-        stream.watermark = change.cursor;
+        stream.watermark = lastCursor;
         this.logger.warn(`CDC delivery for ${bridgeId} failed and was recorded: ${message}`);
       } catch {
         // can't even record the failure: stop instead of silently acking away
@@ -429,6 +590,220 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
         await this.teardown(bridgeId).catch(() => undefined);
         await this.jobs.finalize(stream.jobId, 'failed', message).catch(() => undefined);
       }
+    }
+  }
+
+  /**
+   * Hand a batch to the durable spool and checkpoint the SOURCE against it.
+   *
+   * This is the point of the spool: once the changes are durably in Redis the
+   * source's log may advance, so a slow or unreachable destination can no
+   * longer pin WAL on the production database. The destination is caught up
+   * separately by the consumer.
+   */
+  private async spoolBatch(
+    bridgeId: string,
+    stream: Stream,
+    items: Buffered[],
+    lastCursor: string,
+  ): Promise<void> {
+    // bounded: an unbounded spool would just move the unbounded growth from
+    // the source's WAL into Redis. Blocking here propagates backpressure all
+    // the way back to the reader, which is what we want when the destination
+    // cannot keep up.
+    while (this.streams.get(bridgeId) === stream) {
+      let depth: number;
+      try {
+        depth = await this.spool.depth(bridgeId);
+      } catch {
+        break; // depth is only advisory; a failed append below is the real guard
+      }
+      if (depth < runtimeConfig.cdcSpoolMax) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (this.streams.get(bridgeId) !== stream) return;
+
+    const entries = items.map((i) => ({
+      op: i.change.op,
+      row: i.row,
+      cursor: i.change.cursor,
+    }));
+
+    // the cursor may only advance once the spool has the changes, so a failed
+    // append must never checkpoint. retry briefly, then stop the stream: the
+    // source still holds everything after the last ack, so a restart replays
+    // it and nothing is lost
+    let appended = false;
+    for (let attempt = 0; attempt < 3 && !appended; attempt++) {
+      try {
+        await this.spool.append(bridgeId, entries);
+        appended = true;
+      } catch (err) {
+        if (attempt === 2) {
+          const message = (err as Error).message;
+          this.logger.error(
+            `CDC ${bridgeId}: could not write to the spool, stopping without ` +
+              `advancing the cursor so nothing is lost: ${message}`,
+          );
+          await this.jobs
+            .finalize(stream.jobId, 'failed', `Spool unavailable: ${message}`)
+            .catch(() => undefined);
+          setImmediate(() => void this.teardown(bridgeId).catch(() => undefined));
+          return;
+        }
+        await new Promise((r) => setTimeout(r, backoffMs(attempt)));
+      }
+    }
+
+    stream.watermark = lastCursor;
+    try {
+      await this.prisma.bridgeJob.update({
+        where: { id: stream.jobId },
+        data: { cursorJson: JSON.stringify({ cursor: lastCursor }) },
+      });
+      await stream.handle.ack?.(lastCursor);
+    } catch (err) {
+      // the changes are safely spooled; a missed checkpoint only means the
+      // source replays them, which the watermark dedupe absorbs
+      this.logger.warn(
+        `CDC ${bridgeId}: spooled but could not checkpoint: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * Split spooled items into runs that can each go out as ONE delivery: the
+   * same operation throughout, and no repeated key — a multi-row upsert cannot
+   * touch the same row twice.
+   */
+  private deliverableRuns(items: SpooledItem[], pk: string[] | null): SpooledItem[][] {
+    const runs: SpooledItem[][] = [];
+    let current: SpooledItem[] = [];
+    let currentOp: string | null = null;
+    let seen = new Set<string>();
+
+    for (const item of items) {
+      const sig = pk?.length
+        ? JSON.stringify(pk.map((c) => item.entry.row[c]))
+        : null;
+      const breaks =
+        current.length > 0 &&
+        (currentOp !== item.entry.op || (sig !== null && seen.has(sig)));
+      if (breaks) {
+        runs.push(current);
+        current = [];
+        seen = new Set();
+      }
+      current.push(item);
+      currentOp = item.entry.op;
+      if (sig !== null) seen.add(sig);
+    }
+    if (current.length > 0) runs.push(current);
+    return runs;
+  }
+
+  /**
+   * Drain the spool into the destination. Entries are trimmed only after they
+   * have been delivered (or recorded as failed), so a crash redelivers them —
+   * at-least-once, absorbed by the idempotent writes.
+   */
+  private startConsumer(bridgeId: string, stream: Stream): void {
+    stream.consumer = (async () => {
+      while (!stream.consumerStop) {
+        let items: SpooledItem[];
+        try {
+          items = await this.spool.read(bridgeId, stream.maxBatch);
+        } catch (err) {
+          this.logger.warn(
+            `CDC ${bridgeId}: spool read failed: ${(err as Error).message}`,
+          );
+          await new Promise((r) => setTimeout(r, 500));
+          continue;
+        }
+        if (items.length === 0) {
+          await new Promise((r) =>
+            setTimeout(r, Math.max(10, runtimeConfig.cdcLingerMs)),
+          );
+          continue;
+        }
+
+        for (const run of this.deliverableRuns(items, stream.primaryKey)) {
+          if (stream.consumerStop) return;
+          const aborted = await this.deliverSpooled(bridgeId, stream, run);
+          if (aborted) return;
+        }
+      }
+    })().catch((err) => {
+      this.logger.error(
+        `CDC ${bridgeId}: spool consumer stopped: ${(err as Error).message}`,
+      );
+    });
+  }
+
+  /** deliver one run, record it, and trim it from the spool. true = stop */
+  private async deliverSpooled(
+    bridgeId: string,
+    stream: Stream,
+    run: SpooledItem[],
+  ): Promise<boolean> {
+    const bridge = stream.bridge;
+    if (bridge.source.kind !== 'table') return true;
+
+    const rows = run.map((i) => i.entry.row);
+    const op = run[0]!.entry.op;
+    const lastId = run[run.length - 1]!.id;
+    const seq = stream.seq;
+    const pk = stream.primaryKey;
+    const rowKeys = pk?.length
+      ? run.map((i) => (pk.length === 1 ? i.entry.row[pk[0]!] : pk.map((c) => i.entry.row[c])))
+      : null;
+    const idem =
+      bridge.destination.kind === 'http' && bridge.destination.idempotency
+        ? `${stream.jobId}:${run[run.length - 1]!.entry.cursor}`
+        : undefined;
+
+    try {
+      const { outcome } = await this.sink.deliver(
+        bridge,
+        rows,
+        {
+          table: bridge.source.table,
+          now: new Date().toISOString(),
+          startIndex: seq,
+          op,
+        },
+        new AbortController().signal,
+        idem,
+      );
+      await this.jobs.recordDelivery(
+        stream.jobId,
+        { sequence: seq, rowIndex: seq, rowCount: rows.length, rowKeys },
+        outcome,
+      );
+      if (outcome.status === 'failed' && bridge.delivery.onError === 'abort') {
+        this.logger.warn(`CDC ${bridgeId}: pausing after a failed delivery (onError=abort)`);
+        await this.jobs
+          .finalize(stream.jobId, 'paused', 'Paused after a failed delivery (onError=abort).')
+          .catch(() => undefined);
+        // leave the run in the spool so a restart retries it
+        setImmediate(() => void this.teardown(bridgeId).catch(() => undefined));
+        return true;
+      }
+      stream.seq = seq + 1;
+      // delivered: the spool may forget it. the head advances, so reads stay
+      // cheap however many millions have passed through
+      await this.spool.trimThrough(bridgeId, lastId);
+      await this.prisma.bridgeJob
+        .update({ where: { id: stream.jobId }, data: { cursorOffset: stream.seq } })
+        .catch(() => undefined);
+      return false;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`CDC ${bridgeId}: spooled delivery failed: ${message}`);
+      // do NOT trim: the entries stay so the next pass retries them. back off
+      // so a persistently broken destination does not spin
+      await new Promise((r) => setTimeout(r, 1_000));
+      return false;
     }
   }
 
