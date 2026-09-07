@@ -18,7 +18,8 @@
     "toggle": "切换主题"
   },
   "nav": {
-    "dataSources": "数据源"
+    "dataSources": "数据源",
+    "docs": "文档"
   },
   "auth": {
     "login": {

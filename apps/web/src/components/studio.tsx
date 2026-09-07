@@ -3,7 +3,7 @@
 import { useEffect } from 'react';
 import Image from 'next/image';
 import { useTranslations } from 'next-intl';
-import { Database } from 'lucide-react';
+import { BookOpen, Database } from 'lucide-react';
 import { useStudio } from '@/lib/store';
 import {
   ResizableHandle,
@@ -99,6 +99,17 @@ export function Studio() {
                   onClick={openDataSources}
                 >
                   <Database className="h-4 w-4" />
+                </Button>
+                <Button variant="ghost" size="icon" className="h-8 w-8" asChild>
+                  <a
+                    href="https://syncle.dev/docs"
+                    target="_blank"
+                    rel="noreferrer noopener"
+                    title={t('docs')}
+                    aria-label={t('docs')}
+                  >
+                    <BookOpen className="h-4 w-4" />
+                  </a>
                 </Button>
                 <ThemeToggle />
                 <LangToggle />
