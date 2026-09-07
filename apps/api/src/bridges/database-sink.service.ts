@@ -139,39 +139,66 @@ export class DatabaseSinkService {
       target.connectionId,
       target.database,
       async (adapter) => {
-        // write the whole batch for this target, one row at a time
+        const { schema, table } = target;
+
+        // one set-based statement per batch where the engine supports it,
+        // otherwise the original row-at-a-time loop. Both paths must produce
+        // the same rows and the same `affected` count — only the number of
+        // round trips differs.
         const writeBatch = async (): Promise<void> => {
-          for (const row of rows) {
-            const mapped = mapRow(row, target.mapping);
-            if (op === 'delete') {
-              const identity = pick(mapped, target.keyColumns);
-              const res = await adapter.deleteRow({
-                schema: target.schema,
-                table: target.table,
-                identity,
-              });
+          const mapped = rows.map((row) => mapRow(row, target.mapping));
+          const isUpsert = op !== 'delete' && target.writeMode !== 'insert';
+          if (isUpsert && target.keyColumns.length === 0) {
+            throw new Error(
+              'Upsert needs at least one key column; set keys or use insert mode',
+            );
+          }
+
+          if (op === 'delete') {
+            const identities = mapped.map((m) => pick(m, target.keyColumns));
+            if (adapter.deleteRows) {
+              const res = await adapter.deleteRows({ schema, table, identities });
               affected += res.affectedRows ?? 0;
-            } else if (target.writeMode === 'insert') {
-              const res = await adapter.insertRow({
-                schema: target.schema,
-                table: target.table,
-                values: mapped,
-              });
-              affected += res.affectedRows ?? 1;
-            } else {
-              if (target.keyColumns.length === 0) {
-                throw new Error(
-                  'Upsert needs at least one key column; set keys or use insert mode',
-                );
-              }
-              const res = await adapter.upsertRow({
-                schema: target.schema,
-                table: target.table,
-                values: mapped,
-                keyColumns: target.keyColumns,
-              });
+              return;
+            }
+            for (const identity of identities) {
+              const res = await adapter.deleteRow({ schema, table, identity });
+              affected += res.affectedRows ?? 0;
+            }
+            return;
+          }
+
+          if (target.writeMode === 'insert') {
+            if (adapter.insertRows) {
+              const res = await adapter.insertRows({ schema, table, rows: mapped });
+              affected += res.affectedRows ?? mapped.length;
+              return;
+            }
+            for (const values of mapped) {
+              const res = await adapter.insertRow({ schema, table, values });
               affected += res.affectedRows ?? 1;
             }
+            return;
+          }
+
+          if (adapter.upsertRows) {
+            const res = await adapter.upsertRows({
+              schema,
+              table,
+              rows: mapped,
+              keyColumns: target.keyColumns,
+            });
+            affected += res.affectedRows ?? mapped.length;
+            return;
+          }
+          for (const values of mapped) {
+            const res = await adapter.upsertRow({
+              schema,
+              table,
+              values,
+              keyColumns: target.keyColumns,
+            });
+            affected += res.affectedRows ?? 1;
           }
         };
 
