@@ -47,6 +47,14 @@ export const FAQ: { q: string; a: string }[] = [
     q: 'How is it different from Airbyte or Debezium?',
     a: 'Scale of setup. Airbyte expects a platform deployment — Kubernetes, or Docker Compose at smaller scale — and a team to operate it; Debezium expects Kafka. Syncle is one command, four containers and a web interface, aimed at one operator who wants their databases kept in step without standing up a data platform first.',
   },
+  {
+    q: 'How much can it move?',
+    a: 'Changes are delivered in batches, so a stream costs one delivery, one cursor write and one source acknowledgement per batch rather than per row. Measured on a laptop, against containerised PostgreSQL on the same machine: about 10,000 rows a second, and a million rows end to end in 54 seconds with the optional Redis spool enabled — each row arriving exactly once. Your numbers will differ; the figure that travels is the shape, which is that round trips rather than the database set the pace. There is no published benchmark against managed or remote databases yet, and network latency is what dominates there.',
+  },
+  {
+    q: 'What happens if the destination goes down?',
+    a: 'By default the reader stops advancing, which means the source keeps its change log until the destination is back — safe, but on PostgreSQL a long outage leaves WAL accumulating on the source. Turning on the optional spool changes that: changes are written to a durable Redis stream first and the source is acknowledged immediately, so its log advances at the speed of Redis rather than the destination. The spool is bounded, so a stalled destination throttles the reader instead of growing without limit. It is off by default, because while a change sits in the spool Redis is the only copy of it and that trade should be deliberate.',
+  },
 ];
 
 /** Real jobs people reach for a sync tool to do. `tag` names the trigger. */

@@ -395,11 +395,36 @@ Env files are created automatically on first run from the committed
 | `REDIS_URL`                   | api   | Redis backing the bridge-job queue           |
 | `SYNCLE_MASTER_KEY`       | api   | base64 32-byte key for secret encryption     |
 | `SYNCLE_JOB_CONCURRENCY` | api   | How many bridge jobs may execute in parallel |
+| `SYNCLE_CDC_BATCH_SIZE`  | api   | Rows per CDC delivery to a database destination (default `200`) |
+| `SYNCLE_CDC_LINGER_MS`   | api   | How long a partial CDC batch waits before it is sent (default `50`) |
+| `SYNCLE_CDC_SPOOL`       | api   | `on` to spool changes through Redis before writing (default off) |
+| `SYNCLE_CDC_SPOOL_MAX`   | api   | Unwritten changes held in the spool before the reader is throttled (default `50000`) |
 | `WEB_ORIGIN`                  | api   | CORS origin (defaults to any in dev)         |
 
 If `SYNCLE_MASTER_KEY` is unset, a random key is generated under
 `apps/api/.syncle/` on first run — set it explicitly in production
 (generate one with `openssl rand -base64 32`).
+
+### CDC throughput
+
+A change stream is delivered in batches rather than a row at a time — one
+delivery, one delivery record, one cursor write and one source ack per batch
+instead of per row. Batching is applied only to **database** destinations,
+where it cannot be observed: writes are idempotent upserts keyed by column, so
+N-at-once and N one-at-a-time leave the same table. HTTP destinations keep
+using the bridge's own `batchSize`, because there the batch size is the payload
+the receiver sees.
+
+`SYNCLE_CDC_SPOOL=on` additionally puts a durable spool (a Redis Stream)
+between the reader and the writer, and acknowledges the source as soon as
+changes are spooled. That is what stops a slow or unreachable destination from
+holding the **source's** log open — the failure mode where a Postgres slot
+stops advancing and WAL fills the production database's disk.
+
+It is off by default on purpose. While a change sits in the spool, Redis is the
+only copy of it, so enable it only where Redis has persistence (`appendonly
+yes`). Past `SYNCLE_CDC_SPOOL_MAX` the reader is throttled, so a stalled
+destination cannot turn into unbounded Redis growth.
 
 ### Remote databases (SSH tunnels)
 
