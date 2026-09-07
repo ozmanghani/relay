@@ -7,6 +7,9 @@
  * touch a developer's real database, the dev stack, or an installed app stack.
  */
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { bootstrapDrivers, createAdapter } from '@syncle/core/adapters';
 import type { ConnectionConfig, DatabaseAdapter, DatabaseEngine } from '@syncle/core';
 
@@ -47,6 +50,10 @@ export const TEST_CONNECTIONS: Record<string, ConnectionConfig> = {
     database: 'syncle_test',
   }),
   redis: base('redis', { host: '127.0.0.1', port: 56379 }),
+  // file-backed, so it needs no container; a fresh temp file per run
+  sqlite: base('sqlite', {
+    database: join(mkdtempSync(join(tmpdir(), 'syncle-it-')), 'test.db'),
+  }),
 };
 
 /** open a real adapter, run `fn`, always disconnect */

@@ -23,13 +23,16 @@ import type {
   DatabaseEngine,
   DatabaseSchema,
   DeleteRowParams,
+  DeleteRowsParams,
   FilterSpec,
   InsertRowParams,
+  InsertRowsParams,
   QueryResult,
   RestoreResult,
   TableSchema,
   UpdateRowParams,
   UpsertRowParams,
+  UpsertRowsParams,
 } from '../types';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { BadRequestError } from '../../errors';
@@ -502,6 +505,164 @@ export abstract class BaseSqlAdapter implements DatabaseAdapter {
       sql,
       cols.map((c) => p.values[c]),
     );
+  }
+
+  /* ----- set-based writes ----------------------------------------------- */
+
+  /**
+   * Group rows by the exact set of columns they carry. A change stream can emit
+   * sparse rows, and one multi-row INSERT needs a single uniform column list,
+   * so rows with different shapes go into separate statements. Insertion order
+   * is preserved within each group.
+   */
+  private groupByColumns(
+    rows: Array<Record<string, unknown>>,
+  ): Array<{ columns: string[]; rows: Array<Record<string, unknown>> }> {
+    const groups = new Map<
+      string,
+      { columns: string[]; rows: Array<Record<string, unknown>> }
+    >();
+    for (const row of rows) {
+      const columns = Object.keys(row);
+      if (columns.length === 0) continue;
+      // the signature must not collide across different column sets, so it is
+      // built from the sorted names; the emitted column order stays as-written
+      const key = JSON.stringify([...columns].sort());
+      const existing = groups.get(key);
+      if (existing) existing.rows.push(row);
+      else groups.set(key, { columns, rows: [row] });
+    }
+    return [...groups.values()];
+  }
+
+  /** rows per statement so `rows × columns` stays under the driver's bind cap */
+  private chunkSize(columnCount: number): number {
+    return Math.max(1, Math.floor(this.maxBindParams() / Math.max(1, columnCount)));
+  }
+
+  /**
+   * One INSERT per column-shape and bind-limit chunk. `tail` appends the
+   * dialect's upsert clause when this is an upsert.
+   *
+   * Values are bound exactly as {@link insertRow} binds them, so a batched
+   * write and the per-row loop it replaces are indistinguishable to the engine.
+   */
+  private async insertGrouped(
+    table: string,
+    schema: string | undefined,
+    rows: Array<Record<string, unknown>>,
+    tail: (columns: string[]) => string,
+  ): Promise<QueryResult> {
+    const target = this.qualify(table, schema);
+    let affected = 0;
+    for (const group of this.groupByColumns(rows)) {
+      const { columns } = group;
+      const colSql = columns.map((c) => this.quoteIdent(c)).join(', ');
+      const size = this.chunkSize(columns.length);
+      for (let i = 0; i < group.rows.length; i += size) {
+        const chunk = group.rows.slice(i, i + size);
+        const params: unknown[] = [];
+        let ph = 1;
+        const tuples = chunk.map((row) => {
+          const placeholders = columns.map((c) => {
+            params.push(row[c]);
+            return this.placeholder(ph++);
+          });
+          return `(${placeholders.join(', ')})`;
+        });
+        const res = await this.runSql(
+          `INSERT INTO ${target} (${colSql}) VALUES ${tuples.join(', ')} ${tail(columns)}`.trim(),
+          params,
+        );
+        // engines report affected rows inconsistently for multi-row upserts
+        // (MySQL counts an update as 2); fall back to the rows we sent
+        affected += res.affectedRows ?? chunk.length;
+      }
+    }
+    return { affectedRows: affected, rowCount: affected, rows: [], columns: [], executionMs: 0 };
+  }
+
+  async insertRows(p: InsertRowsParams): Promise<QueryResult> {
+    if (p.rows.length === 0) {
+      return { affectedRows: 0, rowCount: 0, rows: [], columns: [], executionMs: 0 };
+    }
+    return this.insertGrouped(p.table, p.schema, p.rows, () => '');
+  }
+
+  async upsertRows(p: UpsertRowsParams): Promise<QueryResult> {
+    if (p.rows.length === 0) {
+      return { affectedRows: 0, rowCount: 0, rows: [], columns: [], executionMs: 0 };
+    }
+    if (p.keyColumns.length === 0) {
+      throw new BadRequestError('Cannot upsert without key columns to match on');
+    }
+    return this.insertGrouped(p.table, p.schema, p.rows, (columns) =>
+      this.upsertClause(p.keyColumns, columns),
+    );
+  }
+
+  /**
+   * Upper bound on OR-ed clauses in one DELETE. Staying under the bind cap is
+   * not sufficient: SQLite also limits expression-tree DEPTH (1000 by default),
+   * and a long chain of ORs is a deep tree, so a batch well within the bind
+   * budget can still be rejected. Single-column keys avoid the issue entirely
+   * by using a flat IN list; this cap covers the composite-key form.
+   */
+  protected maxOrClauses(): number {
+    return 200;
+  }
+
+  /**
+   * Deletes many identities. A single key column becomes `k IN (?, ?, …)`,
+   * which is flat and cheap; composite keys fall back to
+   * `(a = ? AND b = ?) OR (…)`, since an IN over tuples is not portable.
+   */
+  async deleteRows(p: DeleteRowsParams): Promise<QueryResult> {
+    if (p.identities.length === 0) {
+      return { affectedRows: 0, rowCount: 0, rows: [], columns: [], executionMs: 0 };
+    }
+    const target = this.qualify(p.table, p.schema);
+    let affected = 0;
+    for (const group of this.groupByColumns(p.identities)) {
+      const { columns } = group;
+      const single = columns.length === 1 ? columns[0] : undefined;
+      // a flat IN list has no depth problem, so it is only bind-capped
+      const size =
+        single !== undefined
+          ? this.chunkSize(1)
+          : Math.min(this.chunkSize(columns.length), this.maxOrClauses());
+
+      for (let i = 0; i < group.rows.length; i += size) {
+        const chunk = group.rows.slice(i, i + size);
+        const params: unknown[] = [];
+        let ph = 1;
+        let where: string;
+
+        if (single !== undefined) {
+          const list = chunk.map((identity) => {
+            params.push(identity[single]);
+            return this.placeholder(ph++);
+          });
+          where = `${this.quoteIdent(single)} IN (${list.join(', ')})`;
+        } else {
+          const clauses = chunk.map((identity) => {
+            const conds = columns.map((c) => {
+              params.push(identity[c]);
+              return `${this.quoteIdent(c)} = ${this.placeholder(ph++)}`;
+            });
+            return `(${conds.join(' AND ')})`;
+          });
+          where = clauses.join(' OR ');
+        }
+
+        const res = await this.runSql(
+          `DELETE FROM ${target} WHERE ${where}`,
+          params,
+        );
+        affected += res.affectedRows ?? 0;
+      }
+    }
+    return { affectedRows: affected, rowCount: affected, rows: [], columns: [], executionMs: 0 };
   }
 
   /* ----- schema management (DDL) ----- */
