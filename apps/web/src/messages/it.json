@@ -16,7 +16,8 @@
     "toggle": "Cambia tema"
   },
   "nav": {
-    "dataSources": "Origini dati"
+    "dataSources": "Origini dati",
+    "docs": "Documentazione"
   },
   "auth": {
     "login": {

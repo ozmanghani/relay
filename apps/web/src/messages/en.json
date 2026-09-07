@@ -16,7 +16,8 @@
     "toggle": "Toggle theme"
   },
   "nav": {
-    "dataSources": "Data sources"
+    "dataSources": "Data sources",
+    "docs": "Docs"
   },
   "auth": {
     "login": {
