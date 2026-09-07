@@ -2,7 +2,7 @@
   "name": "syncle",
   "version": "1.0.0",
   "private": true,
-  "description": "Syncle — keep any databases in sync, live and across engines (PostgreSQL, MySQL, SQLite, MongoDB, Redis), with HTTP endpoints as an extra destination.",
+  "description": "Syncle \u2014 keep any databases in sync, live and across engines (PostgreSQL, MySQL, SQLite, MongoDB, Redis), with HTTP endpoints as an extra destination.",
   "author": "Osman Ahmadzai",
   "license": "MIT",
   "homepage": "https://github.com/osmanahmadxai/SYNCLE#readme",
@@ -44,7 +44,8 @@
     "format": "prettier --write \"**/*.{ts,tsx,css,md}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,css,md}\"",
     "clean": "rm -rf packages/core/dist apps/api/dist apps/web/.next packages/core/tsconfig.tsbuildinfo apps/api/tsconfig.tsbuildinfo",
-    "clean:all": "pnpm clean && rm -rf node_modules apps/*/node_modules packages/*/node_modules"
+    "clean:all": "pnpm clean && rm -rf node_modules apps/*/node_modules packages/*/node_modules",
+    "benchmark": "node scripts/benchmark.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

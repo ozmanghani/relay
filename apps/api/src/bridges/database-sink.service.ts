@@ -254,6 +254,11 @@ export class DatabaseSinkService {
     );
 
     if (exists) {
+      // The target being present does NOT mean its key is indexed. A MongoDB
+      // collection springs into existence on first write, so this branch is the
+      // one a Mongo destination always takes — and without the index every
+      // upsert is a collection scan. ensureKeyIndex is idempotent.
+      await this.ensureKeyIndex(target);
       this.ensured.add(key);
       return;
     }
@@ -283,7 +288,33 @@ export class DatabaseSinkService {
     this.logger.log(
       `Created target table ${targetLabel(target)} (${columns.length} cols)`,
     );
+    await this.ensureKeyIndex(target);
     this.ensured.add(key);
+  }
+
+  /**
+   * Ask the destination to index the columns this target upserts on, where the
+   * engine needs it. Relational engines index their primary key already and do
+   * not implement this; MongoDB does. Failure is logged, not fatal — a missing
+   * index makes writes slow, not wrong.
+   */
+  private async ensureKeyIndex(target: DatabaseTarget): Promise<void> {
+    if (target.writeMode !== 'upsert' || target.keyColumns.length === 0) return;
+    try {
+      await this.pool.withAdapter(target.connectionId, target.database, (adapter) =>
+        adapter.ensureKeyIndex
+          ? adapter.ensureKeyIndex({
+              schema: target.schema,
+              table: target.table,
+              columns: target.keyColumns,
+            })
+          : Promise.resolve(),
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Could not index key columns on ${targetLabel(target)} — upserts will be slower: ${(err as Error).message}`,
+      );
+    }
   }
 
   /**

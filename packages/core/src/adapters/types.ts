@@ -330,6 +330,13 @@ export interface UpsertRowsParams {
   keyColumns: string[];
 }
 
+export interface EnsureKeyIndexParams {
+  schema?: string;
+  table: string;
+  /** the columns a bridge matches on when upserting */
+  columns: string[];
+}
+
 export interface DeleteRowsParams {
   schema?: string;
   table: string;
@@ -428,6 +435,19 @@ export interface DatabaseAdapter {
   deleteRow(params: DeleteRowParams): Promise<QueryResult>;
   /** insert-or-update keyed by `keyColumns`, atomic in the engine's dialect */
   upsertRow(params: UpsertRowParams): Promise<QueryResult>;
+
+  /**
+   * Make sure the key columns a bridge upserts on are indexed. Optional, and
+   * only meaningful where the target's key is NOT already indexed by virtue of
+   * being a primary key: relational engines get that for free, a MongoDB
+   * collection does not — it indexes `_id` and nothing else, so an upsert keyed
+   * on any other field is a collection scan.
+   *
+   * Must be idempotent: callers invoke it whether or not they created the
+   * target, because a collection can come into existence without anyone
+   * calling createTable.
+   */
+  ensureKeyIndex?(params: EnsureKeyIndexParams): Promise<void>;
 
   /* ----- optional set-based writes; see InsertRowsParams for the contract ----- */
   insertRows?(params: InsertRowsParams): Promise<QueryResult>;

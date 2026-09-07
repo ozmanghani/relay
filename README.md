@@ -437,6 +437,31 @@ credentials are encrypted at rest and returned redacted, exactly like
 connection passwords. Tunnels apply to the network engines (PostgreSQL, MySQL,
 MongoDB, Redis); SQLite is a local file and never tunnels.
 
+## Benchmarks
+
+Syncle's throughput is measured, not asserted. The suite runs against real
+PostgreSQL, MySQL, SQLite and MongoDB in containers, moving **millions of rows**
+per scenario, and records what it observed — including the CPU and memory the
+run cost, and the resource use of each database container.
+
+**[See the results → syncle.dev/benchmarks](https://syncle.dev/benchmarks)**
+
+The numbers are deliberately not reproduced here, because a figure copied into a
+README goes stale the moment the code moves. The page renders
+[`benchmarks/results.json`](benchmarks/results.json), which is produced by the
+runner in [`apps/api/bench`](apps/api/bench) and committed with every run, so
+anything published can be traced to a recorded measurement and reproduced:
+
+```bash
+docker compose -f docker-compose.test.yml up -d
+pnpm benchmark
+```
+
+Read the disclaimer on that page before quoting anything from it. Every database
+runs on the same machine as Syncle there, with no network in between — which
+flatters the absolute figures and is exactly why the comparisons between code
+paths, rather than the raw rates, are the useful part.
+
 ## CDC prerequisites
 
 Replay and watch bridges work anywhere. CDC needs the **source** database
