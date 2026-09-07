@@ -89,11 +89,10 @@ async function prepareMetadataDatabase(): Promise<void> {
   });
   await admin.connect();
   try {
-    const exists = await admin.query(
-      'select 1 from pg_database where datname = $1',
-      ['syncle_meta'],
-    );
-    if (exists.rowCount === 0) await admin.query('create database syncle_meta');
+    for (const db of ['syncle_meta', 'syncle_dest']) {
+      const exists = await admin.query('select 1 from pg_database where datname = $1', [db]);
+      if (exists.rowCount === 0) await admin.query(`create database "${db}"`);
+    }
   } finally {
     await admin.end().catch(() => undefined);
   }
@@ -105,10 +104,34 @@ async function prepareMetadataDatabase(): Promise<void> {
   });
 }
 
+/** MySQL destinations get their own schema too, for symmetry with Postgres */
+async function prepareMysqlDestination(): Promise<void> {
+  const { createAdapter } = await import('@syncle/core/adapters');
+  const adapter = createAdapter(TEST_CONNECTIONS.mysql!);
+  try {
+    await adapter.connect();
+    await adapter.query('CREATE DATABASE IF NOT EXISTS `syncle_dest`');
+  } catch {
+    /* the suite fails later and more clearly if this really matters */
+  } finally {
+    await adapter.close().catch(() => undefined);
+  }
+}
+
 export async function setup(): Promise<void> {
   applyTestEnv();
   bootstrapDrivers();
   await initReplicaSet();
-  for (const name of Object.keys(TEST_CONNECTIONS)) await waitForEngine(name);
+  // the *_dest entries point at databases this function is about to create,
+  // so only the base engines are waited on here
+  for (const name of Object.keys(TEST_CONNECTIONS)) {
+    if (name.endsWith('_dest')) continue;
+    await waitForEngine(name);
+  }
   await prepareMetadataDatabase();
+  await prepareMysqlDestination();
+  // now they exist, confirm they are actually reachable
+  for (const name of Object.keys(TEST_CONNECTIONS)) {
+    if (name.endsWith('_dest')) await waitForEngine(name);
+  }
 }

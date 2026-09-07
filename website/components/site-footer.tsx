@@ -10,6 +10,7 @@ import { MEASURE, WIDE_MEASURE } from '@/lib/layout';
 export function SiteFooter({ wide = false }: { wide?: boolean }) {
   const links: [string, string][] = [
     ['/docs', 'Documentation'],
+    ['/benchmarks', 'Benchmarks'],
     [GITHUB, 'Source'],
     [`${GITHUB}/discussions`, 'Discussions'],
     [`${GITHUB}/releases/latest`, 'Releases'],

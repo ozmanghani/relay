@@ -11,6 +11,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
 
   return [
     { url: SITE_URL, lastModified },
+    { url: `${SITE_URL}/benchmarks`, lastModified },
     ...DOC_PAGES.map((page) => ({
       url: `${SITE_URL}${docHref(page)}`,
       lastModified,

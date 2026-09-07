@@ -50,6 +50,25 @@ export const TEST_CONNECTIONS: Record<string, ConnectionConfig> = {
     database: 'syncle_test',
   }),
   redis: base('redis', { host: '127.0.0.1', port: 56379 }),
+  // Destinations live in their OWN databases, which is both realistic and
+  // necessary for measurement: a Postgres logical slot is database-scoped, so
+  // writing the destination into the source's database makes the source's
+  // decoder chew through the destination's WAL as well — a feedback loop that
+  // gets worse the more rows you sync.
+  postgres_dest: base('postgres', {
+    host: '127.0.0.1',
+    port: 55432,
+    user: 'syncle',
+    password: 'syncle',
+    database: 'syncle_dest',
+  }),
+  mysql_dest: base('mysql', {
+    host: '127.0.0.1',
+    port: 53306,
+    user: 'root',
+    password: 'syncle',
+    database: 'syncle_dest',
+  }),
   // file-backed, so it needs no container; a fresh temp file per run
   sqlite: base('sqlite', {
     database: join(mkdtempSync(join(tmpdir(), 'syncle-it-')), 'test.db'),

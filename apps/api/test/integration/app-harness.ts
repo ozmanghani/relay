@@ -37,14 +37,14 @@ export async function bootstrapApp(): Promise<AppHandle> {
   };
 }
 
-export async function connectionFor(
-  app: AppHandle,
-  engine: 'postgres' | 'mysql',
-): Promise<string> {
-  const t = TEST_CONNECTIONS[engine]!;
+/** a key into TEST_CONNECTIONS; `*_dest` variants point at a separate database */
+export type ConnKey = 'postgres' | 'mysql' | 'mongodb' | 'postgres_dest' | 'mysql_dest';
+
+export async function connectionFor(app: AppHandle, key: ConnKey): Promise<string> {
+  const t = TEST_CONNECTIONS[key]!;
   const conn = await app.connections.create({
-    name: `it-${engine}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    engine,
+    name: `it-${key}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    engine: t.engine,
     host: t.host,
     port: t.port,
     user: t.user,
@@ -67,13 +67,13 @@ export interface SyncSetup {
 export async function makeBridge(
   app: AppHandle,
   opts: {
-    destEngine: 'postgres' | 'mysql';
+    destEngine: ConnKey;
     sourceConnId: string;
     destConnId: string;
     cleanups: Array<() => Promise<void>>;
     start?: boolean;
     /** engine the source table lives on; defaults to postgres */
-    sourceEngine?: 'postgres' | 'mysql';
+    sourceEngine?: ConnKey;
   },
 ): Promise<SyncSetup> {
   const { destEngine, sourceConnId, destConnId, cleanups } = opts;
@@ -133,7 +133,7 @@ export async function makeBridge(
 
 /** rows in the destination table, sorted by id; [] before the sink creates it */
 export async function destRows(
-  engine: 'postgres' | 'mysql',
+  engine: ConnKey,
   table: string,
 ): Promise<Array<Record<string, unknown>>> {
   return withAdapter(engine, async (a) => {
@@ -150,31 +150,34 @@ export async function destRows(
  * Row count in the destination. `destRows` pages through `browse`, which is
  * capped (5000 by default), so anything larger must be counted in the engine.
  */
-export async function destCount(
-  engine: 'postgres' | 'mysql',
-  table: string,
-): Promise<number> {
+export async function destCount(engine: ConnKey, table: string): Promise<number> {
   return withAdapter(engine, async (a) => {
     try {
-      const res = await a.query(`SELECT COUNT(*) AS n FROM "${table}"`.replace(
-        /"/g,
-        engine === 'mysql' ? '`' : '"',
-      ));
-      const row = res.rows[0] as { n?: unknown };
-      return Number(row?.n ?? 0);
+      // MongoDB has no COUNT statement here, and its browse total is exact.
+      // For SQL engines the total is NOT safe to compare against an expected
+      // row count: MySQL derives it from information_schema.table_rows, which
+      // is an estimate (the adapter flags it as such), so an equality check
+      // against it never becomes true.
+      if (engine === 'mongodb') {
+        const res = await a.browse({ table, limit: 1, offset: 0 });
+        return Number(res.total ?? 0);
+      }
+      const q = engine.startsWith('mysql') ? '`' : '"';
+      const res = await a.query(`SELECT COUNT(*) AS c FROM ${q}${table}${q}`);
+      return Number(Object.values(res.rows[0] ?? {})[0] ?? 0);
     } catch {
-      return 0; // table not created yet
+      return 0; // the sink creates the target on first write
     }
   });
 }
 
 /** distinct ids in the destination, to prove exactly-once at volume */
 export async function destDistinctIds(
-  engine: 'postgres' | 'mysql',
+  engine: ConnKey,
   table: string,
 ): Promise<{ distinct: number; min: number; max: number }> {
   return withAdapter(engine, async (a) => {
-    const q = engine === 'mysql' ? '`' : '"';
+    const q = engine.startsWith('mysql') ? '`' : '"';
     const res = await a.query(
       `SELECT COUNT(DISTINCT id) AS d, MIN(id) AS lo, MAX(id) AS hi FROM ${q}${table}${q}`,
     );

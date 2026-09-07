@@ -17,13 +17,17 @@ import type {
   DatabaseAdapter,
   DatabaseSchema,
   DeleteRowParams,
+  DeleteRowsParams,
+  EnsureKeyIndexParams,
   FilterSpec,
   InsertRowParams,
+  InsertRowsParams,
   QueryResult,
   RestoreResult,
   TableSchema,
   UpdateRowParams,
   UpsertRowParams,
+  UpsertRowsParams,
 } from '../types';
 import {
   BadRequestError,
@@ -51,6 +55,45 @@ const SAMPLE_SIZE = 50;
 const DEFAULT_LIMIT = 100;
 /** documents fetched per cursor round-trip when streaming a backup */
 const BACKUP_FETCH_BATCH = 1000;
+
+/**
+ * Build the filter and update document for one upsert.
+ *
+ * Key columns live only in the (coerced) filter: `_id` is immutable and mongo
+ * rejects any $set that touches it, even with the same value, and on insert the
+ * equality-filter fields are copied into the new document anyway — so they never
+ * belong in the update payload.
+ *
+ * Shared by upsertRow and upsertRows so the batched path cannot drift from the
+ * single-row one.
+ */
+function buildUpsert(
+  values: Record<string, unknown>,
+  keyColumns: string[],
+): { filter: Record<string, unknown>; update: Record<string, unknown> } {
+  const rawFilter: Record<string, unknown> = {};
+  for (const k of keyColumns) rawFilter[k] = values[k];
+  const filter = coerceId(rawFilter);
+
+  const updates: Record<string, unknown> = {};
+  const onInsert: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(values)) {
+    if (k in rawFilter) continue;
+    if (k === '_id') {
+      // `_id` supplied but not a key column: only settable at insert time
+      onInsert._id = coerceId({ _id: v })._id;
+      continue;
+    }
+    updates[k] = v;
+  }
+  const update: Record<string, unknown> = {};
+  if (Object.keys(updates).length > 0) update.$set = updates;
+  if (Object.keys(onInsert).length > 0) update.$setOnInsert = onInsert;
+  // an empty update document is invalid; a no-op $setOnInsert keeps the
+  // upsert idempotent when every value is a key column
+  if (Object.keys(update).length === 0) update.$setOnInsert = { ...filter };
+  return { filter, update };
+}
 
 export class MongodbAdapter implements DatabaseAdapter {
   readonly engine = 'mongodb' as const;
@@ -271,34 +314,73 @@ export class MongodbAdapter implements DatabaseAdapter {
       throw new QueryError('Cannot upsert without key columns to match on');
     }
     const db = await this.getDb(p.schema);
-    const rawFilter: Record<string, unknown> = {};
-    for (const k of p.keyColumns) rawFilter[k] = p.values[k];
-    const filter = coerceId(rawFilter);
-    // key columns live only in the (coerced) filter: `_id` is immutable and
-    // mongo rejects any $set that touches it (even with the same value), and
-    // on insert the equality-filter fields are copied into the new document
-    // anyway, so they never belong in the update payload
-    const updates: Record<string, unknown> = {};
-    const onInsert: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(p.values)) {
-      if (k in rawFilter) continue;
-      if (k === '_id') {
-        // `_id` supplied but not a key column: only settable at insert time
-        onInsert._id = coerceId({ _id: v })._id;
-        continue;
-      }
-      updates[k] = v;
-    }
-    const update: Record<string, unknown> = {};
-    if (Object.keys(updates).length > 0) update.$set = updates;
-    if (Object.keys(onInsert).length > 0) update.$setOnInsert = onInsert;
-    // an empty update document is invalid; a no-op $setOnInsert keeps the
-    // upsert idempotent when every value is a key column
-    if (Object.keys(update).length === 0) update.$setOnInsert = { ...filter };
+    const { filter, update } = buildUpsert(p.values, p.keyColumns);
     const res = await db
       .collection(p.table)
       .updateOne(filter, update, { upsert: true });
     return writeResult(res.modifiedCount + (res.upsertedCount ?? 0), 'upsertOne');
+  }
+
+  /**
+   * Index the columns a bridge upserts on. Without this every upsert scans the
+   * collection, which is quadratic as it grows and makes a large sync
+   * effectively never finish. createIndex is idempotent, so this is safe to
+   * call on every job start.
+   *
+   * Not declared unique: a bridge may legitimately key on a non-unique column,
+   * and a uniqueness violation at write time is a worse failure than a
+   * duplicate row.
+   */
+  async ensureKeyIndex(p: EnsureKeyIndexParams): Promise<void> {
+    const columns = p.columns.filter((c) => c !== '_id');
+    if (columns.length === 0) return; // `_id` is already unique and indexed
+    const db = await this.getDb(p.schema);
+    const spec: Record<string, 1> = {};
+    for (const c of columns) spec[c] = 1;
+    await db
+      .collection(p.table)
+      .createIndex(spec, { name: `syncle_key_${columns.join('_')}` });
+  }
+
+  /* ----- set-based writes -------------------------------------------------
+   * Without these the sink falls back to one round trip per row, which on a
+   * change stream is what sets the ceiling. bulkWrite sends the whole batch as
+   * one command while applying the same per-document semantics as above.
+   */
+
+  async insertRows(p: InsertRowsParams): Promise<QueryResult> {
+    if (p.rows.length === 0) return writeResult(0, 'insertMany');
+    const db = await this.getDb(p.schema);
+    const res = await db.collection(p.table).insertMany(p.rows, { ordered: true });
+    return writeResult(res.insertedCount, 'insertMany');
+  }
+
+  async upsertRows(p: UpsertRowsParams): Promise<QueryResult> {
+    if (p.rows.length === 0) return writeResult(0, 'bulkWrite');
+    if (p.keyColumns.length === 0) {
+      throw new QueryError('Cannot upsert without key columns to match on');
+    }
+    const db = await this.getDb(p.schema);
+    const ops = p.rows.map((values) => {
+      const { filter, update } = buildUpsert(values, p.keyColumns);
+      return { updateOne: { filter, update, upsert: true } };
+    });
+    // ordered: a change stream's rows must be applied in the order they occurred
+    const res = await db.collection(p.table).bulkWrite(ops, { ordered: true });
+    return writeResult(
+      (res.modifiedCount ?? 0) + (res.upsertedCount ?? 0) + (res.insertedCount ?? 0),
+      'bulkWrite',
+    );
+  }
+
+  async deleteRows(p: DeleteRowsParams): Promise<QueryResult> {
+    if (p.identities.length === 0) return writeResult(0, 'bulkWrite');
+    const db = await this.getDb(p.schema);
+    const ops = p.identities.map((identity) => ({
+      deleteOne: { filter: coerceId(identity) },
+    }));
+    const res = await db.collection(p.table).bulkWrite(ops, { ordered: true });
+    return writeResult(res.deletedCount ?? 0, 'bulkWrite');
   }
 
   /* ----- schema management ----- */
@@ -306,6 +388,22 @@ export class MongodbAdapter implements DatabaseAdapter {
   async createTable(spec: CreateTableSpec): Promise<void> {
     const db = await this.getDb(spec.schema);
     await db.createCollection(spec.table);
+
+    // Index the key columns. A collection has an index on `_id` and nothing
+    // else, so an upsert keyed on any other field is a collection scan — which
+    // degrades quadratically as the collection grows and makes a large sync
+    // effectively never finish. `_id` is already unique and indexed, so it is
+    // skipped. The index is not declared unique: a bridge may legitimately key
+    // on a non-unique column, and a uniqueness violation at write time would be
+    // a worse failure than a duplicate.
+    const keys = spec.columns.filter((c) => c.primaryKey && c.name !== '_id');
+    if (keys.length === 0) return;
+    const index: Record<string, 1> = {};
+    for (const c of keys) index[c.name] = 1;
+    await db
+      .collection(spec.table)
+      .createIndex(index, { name: `syncle_key_${keys.map((c) => c.name).join('_')}` })
+      .catch(() => undefined); // an index we cannot create must not fail the sync
   }
 
   async dropTable(table: string, schema?: string): Promise<void> {

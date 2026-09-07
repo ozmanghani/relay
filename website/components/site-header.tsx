@@ -14,7 +14,7 @@ export function SiteHeader({
   current,
   wide = false,
 }: {
-  current?: 'docs';
+  current?: 'docs' | 'benchmarks';
   wide?: boolean;
 }) {
   return (
@@ -33,6 +33,13 @@ export function SiteHeader({
           className={current === 'docs' ? 'font-semibold' : 'link'}
         >
           Docs
+        </a>
+        <a
+          href="/benchmarks"
+          aria-current={current === 'benchmarks' ? 'page' : undefined}
+          className={current === 'benchmarks' ? 'font-semibold' : 'link'}
+        >
+          Benchmarks
         </a>
         <a href="/#install" className="link">
           Install
