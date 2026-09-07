@@ -19,7 +19,7 @@ const vitest = ['exec', 'vitest', 'run', '--config', 'vitest.bench.config.ts'];
 /** each pass: a label, the file to run, and the environment it needs */
 const passes = [
   {
-    label: 'Destination writes (per-row vs batched, and 1,000,000 rows)',
+    label: 'Destination write ceiling (1,000,000 rows per engine)',
     file: 'bench/sink-writes.bench.ts',
     env: {},
   },

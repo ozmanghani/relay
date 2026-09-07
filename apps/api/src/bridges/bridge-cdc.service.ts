@@ -74,6 +74,10 @@ interface Stream {
   timer: ReturnType<typeof setTimeout> | null;
   /** rows per delivery for this bridge */
   maxBatch: number;
+  /** rows the byte budget allows, from the first row of the current batch */
+  byteCappedBatch: number | null;
+  /** the delivery currently being written, if any (at most one) */
+  inflight: Promise<void> | null;
   /** the resolved bridge, so a flush needs no extra arguments */
   bridge: ResolvedBridge;
   /** changes go through the durable spool instead of straight to the sink */
@@ -255,6 +259,8 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
     if (stream.timer) clearTimeout(stream.timer);
     stream.consumerStop = true;
     await stream.consumer?.catch(() => undefined);
+    // a delivery may still be writing; let it finish so its checkpoint lands
+    await stream.inflight?.catch(() => undefined);
     // buffered-but-undelivered changes were never acked, so they would replay
     // on resume anyway; flushing here just avoids the needless repeat
     await this.flush(bridgeId, stream).catch(() => undefined);
@@ -297,6 +303,8 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
           ? Math.max(1, runtimeConfig.cdcBatchSize)
           : Math.max(1, bridge.delivery.batchSize),
       bridge,
+      byteCappedBatch: null,
+      inflight: null,
       spooled: runtimeConfig.cdcSpool,
       consumerStop: false,
       consumer: null,
@@ -436,11 +444,27 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
       if (this.streams.get(bridgeId) !== stream) return;
     }
 
+    if (stream.buffer.length === 0) {
+      // one measurement per batch: the stream carries a single table's shape,
+      // so its rows are the same size to within a rounding error
+      let bytes = 0;
+      try {
+        bytes = JSON.stringify(change.row).length;
+      } catch {
+        bytes = 0;
+      }
+      stream.byteCappedBatch =
+        bytes > 0
+          ? Math.max(1, Math.floor(runtimeConfig.cdcBatchBytes / bytes))
+          : null;
+    }
+
     stream.buffer.push({ change, row: change.row, keySig });
     stream.bufferOp = op;
     if (keySig !== null) stream.bufferKeys.add(keySig);
 
-    if (stream.buffer.length >= stream.maxBatch) {
+    const limit = Math.min(stream.maxBatch, stream.byteCappedBatch ?? stream.maxBatch);
+    if (stream.buffer.length >= limit) {
       // a full batch is delivered before this returns, so a provider that
       // awaits onChange still feels backpressure and the buffer stays bounded
       await this.flush(bridgeId, stream);
@@ -484,17 +508,39 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
     }
     if (stream.buffer.length === 0) return;
 
+    // At most ONE delivery in flight. Waiting for the previous one here does
+    // two things: batches reach the destination in the order they were read,
+    // and the reader is throttled to one batch ahead rather than running away.
+    // What it no longer does is make the reader wait for the WRITE — reading
+    // the next batch now overlaps with writing this one.
+    if (stream.inflight) await stream.inflight.catch(() => undefined);
+    if (this.streams.get(bridgeId) !== stream) return;
+    if (stream.buffer.length === 0) return;
+
     const items = stream.buffer;
     const op = stream.bufferOp ?? undefined;
     stream.buffer = [];
     stream.bufferKeys = new Set();
     stream.bufferOp = null;
+    stream.byteCappedBatch = null;
 
+    // deliberately not awaited: the caller returns to reading, and the next
+    // flush awaits this through `inflight`
+    stream.inflight = this.deliverBatch(bridgeId, stream, items, op);
+  }
+
+  /** write one batch, record it, checkpoint the source */
+  private async deliverBatch(
+    bridgeId: string,
+    stream: Stream,
+    items: Buffered[],
+    op: CdcOperation | undefined,
+  ): Promise<void> {
+    const lastCursor = items[items.length - 1]!.change.cursor;
     const bridge = stream.bridge;
     if (bridge.source.kind !== 'table') return;
 
     const rows = items.map((i) => i.row);
-    const lastCursor = items[items.length - 1]!.change.cursor;
 
     if (stream.spooled) {
       await this.spoolBatch(bridgeId, stream, items, lastCursor);

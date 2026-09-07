@@ -6,6 +6,8 @@ import {
   type QueryResult as PgResult,
 } from 'pg';
 import type {
+  InsertRowsParams,
+  UpsertRowsParams,
   AdapterCapabilities,
   ColumnSchema,
   ConnectionConfig,
@@ -98,6 +100,105 @@ export class PostgresAdapter extends BaseSqlAdapter {
       await this.pool.end();
       this.pool = null;
     }
+  }
+
+  /**
+   * Bulk writes that carry the rows as ONE json parameter instead of one
+   * parameter per value.
+   *
+   * A multi-row INSERT binds `rows × columns` parameters, and the wire protocol
+   * caps that at 65,535 — so a large batch has to be split into several
+   * statements no matter how much the caller batched, and each split pays a
+   * parse and a round trip. `json_populate_recordset(null::table, $1)` binds a
+   * single value however many rows it carries, and takes its column types from
+   * the target table itself, so no introspection is needed.
+   *
+   * Only used when it is safe: values must survive JSON. A Buffer would not
+   * (bytea has no JSON representation here), so those fall back to the
+   * parameterised path in the base class, which stays correct if slower.
+   */
+  private jsonSafe(rows: Array<Record<string, unknown>>): boolean {
+    for (const row of rows) {
+      for (const v of Object.values(row)) {
+        if (v instanceof Uint8Array || typeof v === 'bigint') return false;
+      }
+    }
+    return true;
+  }
+
+  /** rows below this are cheaper as a plain multi-row INSERT */
+  private static readonly JSON_BULK_MIN = 250;
+
+  override async insertRows(p: InsertRowsParams): Promise<QueryResult> {
+    if (p.rows.length < PostgresAdapter.JSON_BULK_MIN || !this.jsonSafe(p.rows)) {
+      return super.insertRows(p);
+    }
+    return this.jsonBulk(p.table, p.schema, p.rows, '');
+  }
+
+  override async upsertRows(p: UpsertRowsParams): Promise<QueryResult> {
+    if (
+      p.rows.length < PostgresAdapter.JSON_BULK_MIN ||
+      p.keyColumns.length === 0 ||
+      !this.jsonSafe(p.rows)
+    ) {
+      return super.upsertRows(p);
+    }
+    // grouped by column set, because the tail names the columns to update
+    let affected = 0;
+    for (const [, group] of this.groupRows(p.rows)) {
+      const tail = this.upsertClause(p.keyColumns, Object.keys(group[0] ?? {}));
+      const res = await this.jsonBulk(p.table, p.schema, group, tail);
+      affected += res.affectedRows ?? group.length;
+    }
+    return {
+      affectedRows: affected,
+      rowCount: affected,
+      rows: [],
+      columns: [],
+      executionMs: 0,
+    };
+  }
+
+  /** group rows by their exact column set; sparse streams need this */
+  private groupRows(
+    rows: Array<Record<string, unknown>>,
+  ): Map<string, Array<Record<string, unknown>>> {
+    const groups = new Map<string, Array<Record<string, unknown>>>();
+    for (const row of rows) {
+      const key = JSON.stringify(Object.keys(row).sort());
+      const existing = groups.get(key);
+      if (existing) existing.push(row);
+      else groups.set(key, [row]);
+    }
+    return groups;
+  }
+
+  /** one statement, one parameter, however many rows */
+  private async jsonBulk(
+    table: string,
+    schema: string | undefined,
+    rows: Array<Record<string, unknown>>,
+    tail: string,
+  ): Promise<QueryResult> {
+    const target = this.qualify(table, schema);
+    const columns = Object.keys(rows[0] ?? {});
+    if (columns.length === 0) {
+      return { affectedRows: 0, rowCount: 0, rows: [], columns: [], executionMs: 0 };
+    }
+    const colSql = columns.map((c) => this.quoteIdent(c)).join(', ');
+    const sql =
+      `INSERT INTO ${target} (${colSql}) ` +
+      `SELECT ${colSql} FROM json_populate_recordset(null::${target}, $1::json) ` +
+      tail;
+    const res = await this.runSql(sql.trim(), [JSON.stringify(rows)]);
+    return {
+      affectedRows: res.affectedRows ?? rows.length,
+      rowCount: res.affectedRows ?? rows.length,
+      rows: [],
+      columns: [],
+      executionMs: res.executionMs ?? 0,
+    };
   }
 
   protected override quoteIdent(identifier: string): string {
