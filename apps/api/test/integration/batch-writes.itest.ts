@@ -326,6 +326,60 @@ describe('composite keys and chunking', () => {
       expect(all.rows).toHaveLength(0);
     });
   });
+  it('postgres json bulk path matches the parameterised one exactly', async () => {
+    // Above 250 rows Postgres switches to a single-parameter json_populate_recordset
+    // statement. It must be indistinguishable from the parameterised path it
+    // replaces — same rows, same values, same upsert semantics.
+    const viaJson = uniqueTable('pgj');
+    const viaParams = uniqueTable('pgp');
+    const rows = Array.from({ length: 600 }, (_, i) => ({
+      id: i + 1,
+      name: `n-${i}`,
+      note: i % 4 === 0 ? null : `note-${i}`,
+    }));
+
+    await withAdapter('postgres', async (a) => {
+      await makeTable(a, 'postgres', viaJson);
+      await makeTable(a, 'postgres', viaParams);
+
+      // over the threshold: takes the json path
+      await a.upsertRows?.({ table: viaJson, keyColumns: ['id'], rows });
+      // under it, in slices: takes the parameterised path
+      for (let i = 0; i < rows.length; i += 100) {
+        await a.upsertRows?.({
+          table: viaParams,
+          keyColumns: ['id'],
+          rows: rows.slice(i, i + 100),
+        });
+      }
+      expect(await rowsOf(a, viaJson)).toEqual(await rowsOf(a, viaParams));
+
+      // and it updates on replay rather than duplicating
+      const changed = rows.map((r) => ({ ...r, name: `changed-${r.id}` }));
+      await a.upsertRows?.({ table: viaJson, keyColumns: ['id'], rows: changed });
+      const after = await rowsOf(a, viaJson);
+      expect(after).toHaveLength(600);
+      expect(after[0]).toMatchObject({ id: 1, name: 'changed-1' });
+    });
+  });
+
+  it('postgres json bulk handles sparse rows and nulls', async () => {
+    const table = uniqueTable('pgs');
+    await withAdapter('postgres', async (a) => {
+      await makeTable(a, 'postgres', table);
+      // two column shapes, both over the threshold when combined
+      const rows = [
+        ...Array.from({ length: 300 }, (_, i) => ({ id: i + 1, name: `a${i}`, note: `x${i}` })),
+        ...Array.from({ length: 300 }, (_, i) => ({ id: 300 + i + 1, name: `b${i}` })),
+      ];
+      await a.upsertRows?.({ table, keyColumns: ['id'], rows });
+      const all = await rowsOf(a, table);
+      expect(all).toHaveLength(600);
+      expect(all[0]).toMatchObject({ id: 1, name: 'a0', note: 'x0' });
+      expect(all[599]?.note ?? null).toBeNull();
+    });
+  });
+
   it('splits large COMPOSITE-key deletes without blowing expression depth', async () => {
     // the OR-of-ANDs form is a deep expression tree; SQLite rejects past depth
     // 1000, so this must be chunked by clause count, not just by bind count

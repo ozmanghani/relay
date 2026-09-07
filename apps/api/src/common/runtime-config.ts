@@ -58,7 +58,15 @@ export const runtimeConfig = {
    * crash mid-batch replays that batch, which the watermark dedupe and
    * idempotent writes absorb.
    */
-  cdcBatchSize: Number(process.env.SYNCLE_CDC_BATCH_SIZE ?? 200),
+  cdcBatchSize: Number(process.env.SYNCLE_CDC_BATCH_SIZE ?? 20_000),
+  /**
+   * Ceiling on the bytes held in one batch. A row cap alone is unsafe: 20,000
+   * narrow rows is a few megabytes, but 20,000 wide ones could be gigabytes.
+   * The row size is estimated once per batch from its first row — a change
+   * stream carries one table's shape, so the rows are homogeneous — and the
+   * batch is capped at whichever limit binds first.
+   */
+  cdcBatchBytes: Number(process.env.SYNCLE_CDC_BATCH_BYTES ?? 64 * 1024 * 1024),
   /** how long a partial batch waits for more changes before being flushed */
   cdcLingerMs: Number(process.env.SYNCLE_CDC_LINGER_MS ?? 50),
   /**

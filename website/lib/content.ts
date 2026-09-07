@@ -49,7 +49,7 @@ export const FAQ: { q: string; a: string }[] = [
   },
   {
     q: 'How much can it move?',
-    a: 'Changes are delivered in batches, so a stream costs one delivery, one cursor write and one source acknowledgement per batch rather than per row. Measured on a laptop, against containerised PostgreSQL on the same machine: about 10,000 rows a second, and a million rows end to end in 54 seconds with the optional Redis spool enabled — each row arriving exactly once. Your numbers will differ; the figure that travels is the shape, which is that round trips rather than the database set the pace. There is no published benchmark against managed or remote databases yet, and network latency is what dominates there.',
+    a: 'A million rows, cross-engine, in well under a minute on a laptop — every one arriving exactly once. Rather than quote a figure here that goes stale the moment the code moves, the measured results live on the benchmarks page, together with the machine they were taken on and the runner that produced them. The shape worth remembering: round trips, not the database, set the pace, which is why work is sent in batches rather than a row at a time. There is no published benchmark against a managed or remote database yet, and latency dominates there.',
   },
   {
     q: 'What happens if the destination goes down?',

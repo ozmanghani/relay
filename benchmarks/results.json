@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-07T08:56:11.607Z",
+  "generatedAt": "2026-09-07T09:17:43.760Z",
   "disclaimer": "Measured on a single local machine: Syncle, both databases and Redis all run on the same host, in containers, with no network between them. Real deployments put a network in that path, and against a managed or remote database latency — not the database — is usually what sets the pace, so expect lower absolute numbers there. These runs are useful for comparing code paths against each other, not for predicting your production ceiling. Every figure is measured; none is estimated, extrapolated or rounded up.",
   "environment": {
     "Platform": "darwin 25.5.0 (arm64)",
@@ -21,285 +21,104 @@
         {
           "scenario": "PostgreSQL → PostgreSQL · one delivery per row",
           "rows": 20000,
-          "ms": 83934,
-          "rowsPerSec": 238,
+          "ms": 69386,
+          "rowsPerSec": 288,
           "detail": {
             "verified": "20000 rows, exactly once",
-            "syncle cpu (peak / avg)": "59% / 33%",
-            "syncle memory (peak)": "149 MB",
-            "pg cpu / memory (peak)": "24% / 1324 MB"
+            "syncle cpu (peak / avg)": "146% / 33%",
+            "syncle memory (peak)": "153 MB",
+            "pg cpu / memory (peak)": "22% / 1225 MB"
           }
         },
         {
           "scenario": "PostgreSQL → PostgreSQL · batched",
           "rows": 1000000,
-          "ms": 51974,
-          "rowsPerSec": 19240,
+          "ms": 13153,
+          "rowsPerSec": 76028,
           "detail": {
             "verified": "1000000 rows, exactly once",
-            "syncle cpu (peak / avg)": "71% / 35%",
-            "syncle memory (peak)": "204 MB",
-            "pg cpu / memory (peak)": "118% / 1430 MB"
+            "syncle cpu (peak / avg)": "200% / 36%",
+            "syncle memory (peak)": "228 MB",
+            "pg cpu / memory (peak)": "123% / 1354 MB"
           }
         },
         {
           "scenario": "PostgreSQL → MySQL · batched",
           "rows": 1000000,
-          "ms": 36686,
-          "rowsPerSec": 27258,
+          "ms": 9133,
+          "rowsPerSec": 109493,
           "detail": {
             "verified": "1000000 rows, exactly once",
-            "syncle cpu (peak / avg)": "73% / 42%",
-            "syncle memory (peak)": "248 MB",
-            "pg cpu / memory (peak)": "60% / 1442 MB",
-            "mysql cpu / memory (peak)": "52% / 1228 MB"
+            "syncle cpu (peak / avg)": "220% / 62%",
+            "syncle memory (peak)": "276 MB",
+            "pg cpu / memory (peak)": "92% / 1419 MB",
+            "mysql cpu / memory (peak)": "66% / 1340 MB"
           }
         },
         {
           "scenario": "MySQL → PostgreSQL · batched",
           "rows": 1000000,
-          "ms": 36986,
-          "rowsPerSec": 27037,
+          "ms": 12369,
+          "rowsPerSec": 80847,
           "detail": {
             "verified": "1000000 rows, exactly once",
-            "syncle cpu (peak / avg)": "72% / 37%",
-            "syncle memory (peak)": "224 MB",
-            "pg cpu / memory (peak)": "87% / 1490 MB",
-            "mysql cpu / memory (peak)": "103% / 1381 MB"
+            "syncle cpu (peak / avg)": "236% / 40%",
+            "syncle memory (peak)": "300 MB",
+            "pg cpu / memory (peak)": "133% / 1444 MB",
+            "mysql cpu / memory (peak)": "106% / 1306 MB"
           }
         },
         {
           "scenario": "PostgreSQL → MongoDB · batched",
           "rows": 1000000,
-          "ms": 78739,
-          "rowsPerSec": 12700,
+          "ms": 54409,
+          "rowsPerSec": 18379,
           "detail": {
             "verified": "1000000 rows, exactly once",
-            "syncle cpu (peak / avg)": "75% / 29%",
-            "syncle memory (peak)": "200 MB",
-            "pg cpu / memory (peak)": "45% / 1552 MB"
+            "syncle cpu (peak / avg)": "217% / 13%",
+            "syncle memory (peak)": "245 MB",
+            "pg cpu / memory (peak)": "22% / 1516 MB"
           }
         },
         {
           "scenario": "PostgreSQL → PostgreSQL · batched + durable spool",
           "rows": 1000000,
-          "ms": 49284,
-          "rowsPerSec": 20291,
+          "ms": 21659,
+          "rowsPerSec": 46170,
           "detail": {
             "verified": "1000000 rows, exactly once",
-            "syncle cpu (peak / avg)": "135% / 48%",
-            "syncle memory (peak)": "231 MB",
-            "pg cpu / memory (peak)": "120% / 1358 MB",
-            "peak spool depth": 50000
+            "syncle cpu (peak / avg)": "265% / 59%",
+            "syncle memory (peak)": "381 MB",
+            "pg cpu / memory (peak)": "175% / 1341 MB",
+            "peak spool depth": 65015
           }
         }
       ]
     },
     {
-      "id": "sink-writes",
-      "name": "Destination writes",
-      "description": "Rows written into a destination table through the real adapters. The per-row rows are the old path — one statement per row; the batched rows are one multi-row statement per chunk. Both sides of each pair run at 50,000 rows on the same table, so the rates compare directly.",
+      "id": "write-ceiling",
+      "name": "Destination write ceiling",
+      "description": "Rows written straight into a destination table, with no change stream involved. This is the fastest the destination can accept them, and the bar the sync figures above are measured against.",
       "results": [
         {
-          "scenario": "postgres · insert · one statement per row",
-          "rows": 50000,
-          "ms": 15628,
-          "rowsPerSec": 3199,
-          "detail": {
-            "syncle cpu (peak / avg)": "83% / 12%",
-            "syncle memory (peak)": "102 MB",
-            "pg cpu / memory (peak)": "18% / 1239 MB"
-          }
-        },
-        {
-          "scenario": "postgres · insert · batched",
-          "rows": 50000,
-          "ms": 174,
-          "rowsPerSec": 287356,
-          "detail": {
-            "speed-up": "89.8×",
-            "syncle cpu (peak / avg)": "72% / 38%",
-            "syncle memory (peak)": "109 MB"
-          }
-        },
-        {
-          "scenario": "postgres · upsert · one statement per row",
-          "rows": 50000,
-          "ms": 14616,
-          "rowsPerSec": 3421,
-          "detail": {
-            "syncle cpu (peak / avg)": "51% / 11%",
-            "syncle memory (peak)": "122 MB",
-            "pg cpu / memory (peak)": "23% / 1264 MB"
-          }
-        },
-        {
-          "scenario": "postgres · upsert · batched",
-          "rows": 50000,
-          "ms": 414,
-          "rowsPerSec": 120773,
-          "detail": {
-            "speed-up": "35.3×",
-            "syncle cpu (peak / avg)": "40% / 9%",
-            "syncle memory (peak)": "99 MB"
-          }
-        },
-        {
-          "scenario": "postgres · delete · one statement per row",
-          "rows": 50000,
-          "ms": 13678,
-          "rowsPerSec": 3656,
-          "detail": {
-            "syncle cpu (peak / avg)": "42% / 10%",
-            "syncle memory (peak)": "118 MB",
-            "pg cpu / memory (peak)": "24% / 1264 MB"
-          }
-        },
-        {
-          "scenario": "postgres · delete · batched",
-          "rows": 50000,
-          "ms": 57,
-          "rowsPerSec": 877193,
-          "detail": {
-            "speed-up": "240.0×",
-            "syncle cpu (peak / avg)": "102% / 102%",
-            "syncle memory (peak)": "122 MB"
-          }
-        },
-        {
-          "scenario": "mysql · insert · one statement per row",
-          "rows": 50000,
-          "ms": 18465,
-          "rowsPerSec": 2708,
-          "detail": {
-            "syncle cpu (peak / avg)": "67% / 15%",
-            "syncle memory (peak)": "130 MB",
-            "mysql cpu / memory (peak)": "49% / 1152 MB"
-          }
-        },
-        {
-          "scenario": "mysql · insert · batched",
-          "rows": 50000,
-          "ms": 349,
-          "rowsPerSec": 143266,
-          "detail": {
-            "speed-up": "52.9×",
-            "syncle cpu (peak / avg)": "143% / 31%",
-            "syncle memory (peak)": "119 MB"
-          }
-        },
-        {
-          "scenario": "mysql · upsert · one statement per row",
-          "rows": 50000,
-          "ms": 19127,
-          "rowsPerSec": 2614,
-          "detail": {
-            "syncle cpu (peak / avg)": "54% / 15%",
-            "syncle memory (peak)": "127 MB",
-            "mysql cpu / memory (peak)": "46% / 1221 MB"
-          }
-        },
-        {
-          "scenario": "mysql · upsert · batched",
-          "rows": 50000,
-          "ms": 341,
-          "rowsPerSec": 146628,
-          "detail": {
-            "speed-up": "56.1×",
-            "syncle cpu (peak / avg)": "71% / 17%",
-            "syncle memory (peak)": "106 MB"
-          }
-        },
-        {
-          "scenario": "mysql · delete · one statement per row",
-          "rows": 50000,
-          "ms": 25975,
-          "rowsPerSec": 1925,
-          "detail": {
-            "syncle cpu (peak / avg)": "114% / 15%",
-            "syncle memory (peak)": "125 MB",
-            "mysql cpu / memory (peak)": "65% / 1285 MB"
-          }
-        },
-        {
-          "scenario": "mysql · delete · batched",
-          "rows": 50000,
-          "ms": 247,
-          "rowsPerSec": 202429,
-          "detail": {
-            "speed-up": "105.2×",
-            "syncle cpu (peak / avg)": "47% / 12%",
-            "syncle memory (peak)": "118 MB"
-          }
-        },
-        {
-          "scenario": "sqlite · insert · one statement per row",
-          "rows": 50000,
-          "ms": 1192,
-          "rowsPerSec": 41946,
-          "detail": {}
-        },
-        {
-          "scenario": "sqlite · insert · batched",
-          "rows": 50000,
-          "ms": 68,
-          "rowsPerSec": 735294,
-          "detail": {
-            "speed-up": "17.5×"
-          }
-        },
-        {
-          "scenario": "sqlite · upsert · one statement per row",
-          "rows": 50000,
-          "ms": 681,
-          "rowsPerSec": 73421,
-          "detail": {}
-        },
-        {
-          "scenario": "sqlite · upsert · batched",
-          "rows": 50000,
-          "ms": 52,
-          "rowsPerSec": 961538,
-          "detail": {
-            "speed-up": "13.1×"
-          }
-        },
-        {
-          "scenario": "sqlite · delete · one statement per row",
-          "rows": 50000,
-          "ms": 499,
-          "rowsPerSec": 100200,
-          "detail": {}
-        },
-        {
-          "scenario": "sqlite · delete · batched",
-          "rows": 50000,
-          "ms": 22,
-          "rowsPerSec": 2272727,
-          "detail": {
-            "speed-up": "22.7×"
-          }
-        },
-        {
-          "scenario": "postgres · upsert · batched · 1,000,000 rows",
+          "scenario": "PostgreSQL · upsert",
           "rows": 1000000,
-          "ms": 13025,
-          "rowsPerSec": 76775,
+          "ms": 6756,
+          "rowsPerSec": 148017,
           "detail": {
-            "syncle cpu (peak / avg)": "135% / 11%",
-            "syncle memory (peak)": "156 MB",
-            "pg cpu / memory (peak)": "96% / 1309 MB"
+            "syncle cpu (peak / avg)": "69% / 9%",
+            "syncle memory (peak)": "138 MB",
+            "pg cpu / memory (peak)": "86% / 1241 MB"
           }
         },
         {
-          "scenario": "mysql · upsert · batched · 1,000,000 rows",
+          "scenario": "MySQL · upsert",
           "rows": 1000000,
-          "ms": 5351,
-          "rowsPerSec": 186881,
+          "ms": 3296,
+          "rowsPerSec": 303398,
           "detail": {
-            "syncle cpu (peak / avg)": "97% / 21%",
-            "syncle memory (peak)": "192 MB",
-            "mysql cpu / memory (peak)": "97% / 1369 MB"
+            "syncle cpu (peak / avg)": "98% / 23%",
+            "syncle memory (peak)": "185 MB"
           }
         }
       ]

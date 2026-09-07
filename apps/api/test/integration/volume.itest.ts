@@ -9,9 +9,8 @@
  * destination from turning into unbounded Redis growth, which would just move
  * the problem the spool exists to solve.
  *
- * Recorded on a 2026 laptop against containerised Postgres: 1,000,000 rows in
- * 54s (~18,000 rows/sec), peak spool depth exactly at the 50,000 cap, final
- * depth 0.
+ * Current figures live in benchmarks/results.json rather than in this comment,
+ * which would go stale; run `pnpm benchmark` to refresh them.
  */
 import 'reflect-metadata';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
