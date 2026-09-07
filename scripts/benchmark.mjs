@@ -24,11 +24,6 @@ const passes = [
     env: {},
   },
   {
-    label: 'CDC — one delivery per row (the path before batching)',
-    file: 'bench/cdc.bench.ts',
-    env: { BENCH_MODE: 'per-row', SYNCLE_CDC_BATCH_SIZE: '1' },
-  },
-  {
     label: 'CDC — batched, across four engine pairs',
     file: 'bench/cdc.bench.ts',
     env: { BENCH_MODE: 'batched' },

@@ -9,6 +9,7 @@ import { cpus, totalmem, platform, release, arch } from 'node:os';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { withAdapter } from '../test/integration/harness';
+import { runtimeConfig } from '../src/common/runtime-config';
 
 /** repo-root benchmarks/results.json — the file the website renders */
 export const RESULTS_PATH = resolve(
@@ -39,6 +40,8 @@ export interface BenchSuite {
 
 export interface BenchReport {
   generatedAt: string;
+  /** the settings that produced these figures, read from the running config */
+  configuration: Record<string, string>;
   /** stated plainly on the page: what these numbers are and are not */
   disclaimer: string;
   environment: Record<string, string>;
@@ -125,6 +128,23 @@ async function engineVersions(): Promise<Record<string, string>> {
 }
 
 /**
+ * The configuration the run used, read from the live runtime config rather than
+ * written down here — so the page can never claim settings the run did not use.
+ * These are the shipped defaults unless a scenario says otherwise.
+ */
+export function captureConfiguration(): Record<string, string> {
+  return {
+    'Rows per delivery': `${runtimeConfig.cdcBatchSize.toLocaleString('en-US')} (SYNCLE_CDC_BATCH_SIZE)`,
+    'Batch byte ceiling': `${Math.round(runtimeConfig.cdcBatchBytes / 1024 / 1024)} MB (SYNCLE_CDC_BATCH_BYTES)`,
+    'Partial-batch linger': `${runtimeConfig.cdcLingerMs} ms (SYNCLE_CDC_LINGER_MS)`,
+    'Durable spool': runtimeConfig.cdcSpool
+      ? 'on (SYNCLE_CDC_SPOOL=on)'
+      : 'off — the default; one scenario below enables it',
+    'Write mode': 'idempotent upsert, keyed on the primary key',
+  };
+}
+
+/**
  * What else was running. A benchmark shares the machine with whatever else is
  * up, and containers outside the test stack compete for the same CPU and the
  * same Docker VM memory — enough to halve a result. Recording it means a
@@ -169,6 +189,7 @@ export async function captureEnvironment(): Promise<Record<string, string>> {
 export function publishSuite(suite: BenchSuite, environment: Record<string, string>): void {
   let report: BenchReport = {
     generatedAt: new Date().toISOString(),
+    configuration: captureConfiguration(),
     disclaimer: DISCLAIMER,
     environment,
     suites: [],
@@ -179,6 +200,10 @@ export function publishSuite(suite: BenchSuite, environment: Record<string, stri
     /* first run */
   }
   report.generatedAt = new Date().toISOString();
+  // the spool pass runs with the spool on; keep the defaults the page shows
+  if (!runtimeConfig.cdcSpool || !report.configuration) {
+    report.configuration = captureConfiguration();
+  }
   report.disclaimer = DISCLAIMER;
   report.environment = environment;
 

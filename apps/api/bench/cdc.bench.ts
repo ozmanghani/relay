@@ -4,12 +4,11 @@
  * from the moment the writes begin until the last row has landed.
  *
  * The mode comes from BENCH_MODE, because the settings under test are read once
- * at import: the runner invokes this file several times with different
- * environments and each pass contributes its rows to the same suite.
+ * at import: the runner invokes this file twice with different environments and
+ * each pass contributes its rows to the same suite.
  *
- *   per-row  SYNCLE_CDC_BATCH_SIZE=1   — the path before batching
- *   batched  (defaults)                — batching on, spool off
- *   spool    SYNCLE_CDC_SPOOL=on       — batching on, durable spool on
+ *   batched  (defaults)                — the shipped configuration
+ *   spool    SYNCLE_CDC_SPOOL=on       — the same, with the durable spool on
  */
 import 'reflect-metadata';
 import { afterAll, beforeAll, describe, it } from 'vitest';
@@ -35,9 +34,8 @@ type Engine = 'postgres' | 'mysql';
 /** destinations use their own databases — see TEST_CONNECTIONS for why */
 type Dest = 'postgres_dest' | 'mysql_dest' | 'mongodb';
 
-const MODE = (process.env.BENCH_MODE ?? 'batched') as 'per-row' | 'batched' | 'spool';
-/** the unbatched path is ~50x slower, so it is measured at a smaller volume */
-const ROWS = Number(process.env.BENCH_ROWS ?? (MODE === 'per-row' ? 20_000 : 1_000_000));
+const MODE = (process.env.BENCH_MODE ?? 'batched') as 'batched' | 'spool';
+const ROWS = Number(process.env.BENCH_ROWS ?? 1_000_000);
 const CHUNK = 25_000;
 
 let app: AppHandle;
@@ -188,13 +186,6 @@ async function measure(source: Engine, dest: Dest, label: string): Promise<void>
 }
 
 describe(`cdc throughput — ${MODE}`, () => {
-  if (MODE === 'per-row') {
-    it('postgres to postgres, one delivery per row', async () => {
-      await measure('postgres', 'postgres_dest', 'PostgreSQL → PostgreSQL · one delivery per row');
-    });
-    return;
-  }
-
   if (MODE === 'spool') {
     it('postgres to postgres through the durable spool', async () => {
       await measure('postgres', 'postgres_dest', 'PostgreSQL → PostgreSQL · batched + durable spool');
