@@ -10,6 +10,7 @@ import { BridgeCdcService } from './bridge-cdc.service';
 import { BridgeLifecycleService } from './bridge-lifecycle.service';
 import { BridgeStoreService } from './bridge-store.service';
 import { BridgeWatchProcessor } from './bridge-watch.processor';
+import { CdcSpoolService } from './cdc/cdc-spool.service';
 import { BridgeWatchService } from './bridge-watch.service';
 import { BridgesController } from './bridges.controller';
 import { JobRegistryService } from './job-registry.service';
@@ -40,6 +41,7 @@ import { SqliteCdcProvider } from './cdc/providers/sqlite-cdc.provider';
     JobRegistryService,
     BridgeJobProcessor,
     BridgeWatchProcessor,
+    CdcSpoolService,
     // CDC providers (one per engine) plus the aggregate the orchestrator injects
     PostgresCdcProvider,
     MysqlCdcProvider,

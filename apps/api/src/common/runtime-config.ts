@@ -62,6 +62,21 @@ export const runtimeConfig = {
   /** how long a partial batch waits for more changes before being flushed */
   cdcLingerMs: Number(process.env.SYNCLE_CDC_LINGER_MS ?? 50),
   /**
+   * Put a durable spool (a Redis Stream) between the change reader and the
+   * destination writer. With it on, the source is acknowledged as soon as a
+   * change is spooled, so a slow or unreachable destination no longer holds the
+   * source's log open — the failure mode where a Postgres slot stops advancing
+   * and WAL fills the production database's disk.
+   *
+   * OFF by default, and deliberately so: while a change sits in the spool it
+   * exists ONLY in Redis, so this is safe only where Redis has persistence
+   * (appendonly) enabled. That is a durability trade nobody should make by
+   * accident.
+   */
+  cdcSpool: (process.env.SYNCLE_CDC_SPOOL ?? '') === 'on',
+  /** cap on unwritten changes held in the spool before the reader is throttled */
+  cdcSpoolMax: Number(process.env.SYNCLE_CDC_SPOOL_MAX ?? 50_000),
+  /**
    * when true, HTTP destinations may not resolve to loopback/private/link-local
    * addresses (SSRF guard for network-exposed deployments). off by default —
    * Syncle is local-first and posting to localhost services is a primary use.
