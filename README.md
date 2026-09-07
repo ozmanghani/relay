@@ -10,7 +10,7 @@
 Connect your databases, draw a **bridge** from a source to one or more
 destinations, and Syncle keeps them in sync: the moment a row changes in the
 source, it's written to every destination you linked. Any engine to any engine —
-**PostgreSQL · MySQL/MariaDB · SQLite · MongoDB · Redis** — plus HTTP endpoints
+**PostgreSQL · MySQL · SQLite · MongoDB · Redis** — plus HTTP endpoints
 when you need them.
 
 <sub>A bridge is just: a source → one or more destinations → kept in sync.</sub>
@@ -26,7 +26,7 @@ when you need them.
 ![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=nextdotjs&logoColor=white)
 
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white)
-![MySQL](https://img.shields.io/badge/MySQL%20%2F%20MariaDB-4479A1?logo=mysql&logoColor=white)
+![MySQL](https://img.shields.io/badge/MySQL-4479A1?logo=mysql&logoColor=white)
 ![SQLite](https://img.shields.io/badge/SQLite-003B57?logo=sqlite&logoColor=white)
 ![MongoDB](https://img.shields.io/badge/MongoDB-47A248?logo=mongodb&logoColor=white)
 ![Redis](https://img.shields.io/badge/Redis-DC382D?logo=redis&logoColor=white)
@@ -421,7 +421,7 @@ for you and spells out what's missing.
 | Engine     | Mechanism              | What it needs                                                                                               |
 | ---------- | ---------------------- | ----------------------------------------------------------------------------------------------------------- |
 | PostgreSQL | logical replication    | `wal_level=logical`, a role with REPLICATION (slot/publication auto-made)                                   |
-| MySQL      | binary log             | `log_bin=ON`, `binlog_format=ROW`, `binlog_row_image=FULL`, REPLICATION grants                              |
+| MySQL      | binary log             | `log_bin=ON`, `binlog_format=ROW`, `binlog_row_image=FULL`, REPLICATION grants, `binlog_transaction_compression=OFF` |
 | MongoDB    | change streams         | a replica set (a single-node one is fine for dev); pre-images auto-enabled so deletes propagate by your key |
 | Redis      | keyspace notifications | `notify-keyspace-events` (Syncle enables it when it can)                                               |
 | SQLite     | —                      | not supported; use a watch bridge instead                                                                     |
@@ -429,6 +429,21 @@ for you and spells out what's missing.
 > Redis CDC is real-time only and non-durable — events that happen while Syncle
 > is offline can't be recovered, so prefer a watch bridge there if you need
 > guarantees.
+
+**MySQL specifics.**
+
+- **`binlog_transaction_compression` is not supported.** MySQL 8.0.20+ can wrap
+  a transaction's row events inside a compressed payload event, which the
+  binlog reader has no decoder for — the rows inside it are not seen. Leave it
+  `OFF` on a source you stream from.
+- **MariaDB is untested.** Connections, replay and watch bridges go through
+  `mysql2` and work, but CDC reads the binlog with a client that targets MySQL,
+  and that path has not been verified against MariaDB. Treat MariaDB CDC as
+  unsupported until it has been.
+- **Binlog positions are per-server.** A cursor records the server's
+  `@@server_uuid`; if a connection later reaches a different server (a
+  failover), the bridge refuses to resume rather than reading unrelated
+  offsets. Reset it to start from the current position.
 
 ## Scripts
 

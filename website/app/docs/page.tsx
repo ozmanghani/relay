@@ -16,7 +16,7 @@ export default function DocsIndex() {
       </p>
 
       <p>
-        It speaks five engines — PostgreSQL, MySQL/MariaDB, SQLite, MongoDB
+        It speaks five engines — PostgreSQL, MySQL, SQLite, MongoDB
         and Redis — and any of them can sit on either end of a bridge. A
         relational table can feed a document store, a document collection can
         feed a key-value cache, and an HTTP endpoint can stand in for a

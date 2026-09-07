@@ -46,7 +46,7 @@ export default function Page() {
               <td>Publication and replication slot, per bridge</td>
             </tr>
             <tr>
-              <td>MySQL / MariaDB</td>
+              <td>MySQL</td>
               <td>Row-based binlog</td>
               <td>
                 <code>log_bin=ON</code>, <code>binlog_format=ROW</code>,{' '}
@@ -103,7 +103,7 @@ export default function Page() {
         off without skipping changes.
       </p>
 
-      <h3 id="mysql">MySQL / MariaDB</h3>
+      <h3 id="mysql">MySQL</h3>
       <p>
         Syncle connects as a replication client and decodes row events from
         the binary log. Four server settings matter, and on managed MySQL
@@ -122,6 +122,33 @@ server_id        = 1   # any unique id`}</CodeBlock>
         There is nothing to provision — the binlog already exists. The cursor
         is the binlog file and position, so MySQL CDC is durable and resumes
         exactly after a restart, even in the middle of a multi-row statement.
+      </p>
+      <p>
+        Three limits are worth knowing before you point a bridge at MySQL.
+      </p>
+      <p>
+        <strong>
+          <code>binlog_transaction_compression</code> is not supported.
+        </strong>{' '}
+        MySQL 8.0.20 and later can wrap a transaction&apos;s row events inside a
+        compressed payload event, and the binlog reader has no decoder for it —
+        the rows inside are not seen. Leave it <code>OFF</code> on a source you
+        stream from.
+      </p>
+      <p>
+        <strong>MariaDB is untested.</strong> Connections, replay and watch
+        bridges go through <code>mysql2</code> and work, but CDC reads the
+        binlog with a client that targets MySQL and that path has not been
+        verified against MariaDB. Treat MariaDB CDC as unsupported until it has
+        been.
+      </p>
+      <p>
+        <strong>Binlog positions belong to one server.</strong> A cursor records
+        the server&apos;s <code>@@server_uuid</code> (and the GTID of the
+        transaction it sits at). If the connection later reaches a different
+        server — after a failover, say — the bridge refuses to resume rather
+        than reading unrelated offsets, and says so. Reset it to start from the
+        current position.
       </p>
 
       <h3 id="mongodb">MongoDB</h3>

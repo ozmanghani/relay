@@ -115,7 +115,7 @@ export default function Home() {
           </p>
 
           <p className="mt-4 max-w-[70ch]">
-            It speaks PostgreSQL, MySQL and MariaDB, SQLite, MongoDB and Redis,
+            It speaks PostgreSQL, MySQL, SQLite, MongoDB and Redis,
             and any of them can sit on either end. An HTTP endpoint works as a
             destination too, when the thing that needs the rows is a service
             rather than a database.

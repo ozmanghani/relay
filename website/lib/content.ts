@@ -25,7 +25,7 @@ export const DESCRIPTION =
 export const FAQ: { q: string; a: string }[] = [
   {
     q: 'Which databases can Syncle sync between?',
-    a: 'PostgreSQL, MySQL and MariaDB, SQLite, MongoDB and Redis — in any combination. A relational source can write into a document or key-value store and back, with values translated to fit the target. HTTP endpoints work as a destination too, when you are feeding a service rather than a database.',
+    a: 'PostgreSQL, MySQL, SQLite, MongoDB and Redis — in any combination. A relational source can write into a document or key-value store and back, with values translated to fit the target. HTTP endpoints work as a destination too, when you are feeding a service rather than a database.',
   },
   {
     q: 'Does it sync in real time, or on a schedule?',

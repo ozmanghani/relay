@@ -6,6 +6,27 @@ to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- MySQL CDC refuses to resume when the connection reaches a different server
+  than the one that issued its stored binlog position. File and position are
+  only meaningful on the issuing server, so after a failover the old cursor
+  pointed somewhere unrelated and the stream read it anyway. Cursors now carry
+  the server's `@@server_uuid`, and the transaction's GTID alongside it.
+- A MySQL bridge no longer starts reporting itself as running before the binlog
+  reader is positioned. On a fresh bridge that races the first writes, and rows
+  written immediately after starting were lost.
+
+### Changed
+
+- Documentation no longer claims MariaDB support. Connections, replay and watch
+  bridges work through `mysql2`, but CDC reads the binlog with a client that
+  targets MySQL and has not been verified against MariaDB. The 1.0.0 notes
+  below listed it; that was the claim being corrected here, not a regression.
+- `binlog_transaction_compression` is documented as unsupported. MySQL 8.0.20+
+  can wrap row events in a compressed payload event that the binlog reader
+  cannot decode, so those rows are not seen.
+
 ## [1.2.0] - 2026-08-21
 
 Setup no longer sends you to the container logs.
