@@ -72,23 +72,30 @@ export async function makeBridge(
     destConnId: string;
     cleanups: Array<() => Promise<void>>;
     start?: boolean;
+    /** engine the source table lives on; defaults to postgres */
+    sourceEngine?: 'postgres' | 'mysql';
   },
 ): Promise<SyncSetup> {
   const { destEngine, sourceConnId, destConnId, cleanups } = opts;
+  const sourceEngine = opts.sourceEngine ?? 'postgres';
   const sourceTable = uniqueTable('src');
   const destTable = uniqueTable('dst');
 
-  await withAdapter('postgres', (a) =>
+  const srcTypes =
+    sourceEngine === 'mysql'
+      ? { int: 'int', text: 'varchar(255)' }
+      : { int: 'integer', text: 'text' };
+  await withAdapter(sourceEngine, (a) =>
     a.createTable({
       table: sourceTable,
       columns: [
-        { name: 'id', type: 'integer', nullable: false, primaryKey: true },
-        { name: 'name', type: 'text', nullable: true },
+        { name: 'id', type: srcTypes.int, nullable: false, primaryKey: true },
+        { name: 'name', type: srcTypes.text, nullable: true },
       ],
     }),
   );
   cleanups.push(() =>
-    withAdapter('postgres', (a) => a.dropTable(sourceTable)).catch(() => undefined),
+    withAdapter(sourceEngine, (a) => a.dropTable(sourceTable)).catch(() => undefined),
   );
   cleanups.push(() =>
     withAdapter(destEngine, (a) => a.dropTable(destTable)).catch(() => undefined),
