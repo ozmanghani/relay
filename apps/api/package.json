@@ -2,7 +2,7 @@
   "name": "@syncle/api",
   "version": "0.1.0",
   "private": true,
-  "description": "Syncle backend — NestJS API that runs cross-engine database-to-database sync bridges (replay, polling, and CDC).",
+  "description": "Syncle backend \u2014 NestJS API that runs cross-engine database-to-database sync bridges (replay, polling, and CDC).",
   "scripts": {
     "build": "prisma generate && nest build",
     "dev": "prisma generate && prisma migrate deploy && nest start --watch",
@@ -13,7 +13,8 @@
     "migrate:dev": "prisma migrate dev",
     "migrate:deploy": "prisma migrate deploy",
     "postinstall": "prisma generate",
-    "test:coverage": "vitest run --passWithNoTests --coverage"
+    "test:coverage": "vitest run --passWithNoTests --coverage",
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
     "@nestjs/bullmq": "^10.2.3",

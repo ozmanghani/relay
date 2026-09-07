@@ -1,0 +1,97 @@
+# Real databases for the integration suite (`pnpm test:integration`).
+#
+#   docker compose -f docker-compose.test.yml up -d
+#
+# `name:` pins the Compose project. Without it the project is derived from the
+# directory and this file would MERGE with the dev stack in docker-compose.yml
+# and with an installed app stack at ~/.syncle/docker-compose.app.yml — a
+# service named `redis` here would then recreate *their* redis. Keep the name.
+#
+# These are throwaway instances on non-default ports so they never collide with
+# the dev stack in docker-compose.yml or with anything local. Every engine is
+# configured for CHANGE CAPTURE, which is the whole point of the suite:
+# Postgres needs logical WAL + slots, MySQL needs a row-format binlog (and GTID,
+# so failover-resume can be tested), MongoDB needs a replica set for change
+# streams, and Redis needs keyspace notifications.
+#
+# tmpfs storage: these are disposable and speed matters more than durability.
+name: syncle-test
+
+services:
+  pg:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: syncle
+      POSTGRES_PASSWORD: syncle
+      POSTGRES_DB: syncle_test
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=20
+      - -c
+      - max_wal_senders=20
+      # surface slot lag quickly in tests rather than after a default timeout
+      - -c
+      - wal_sender_timeout=5s
+    ports: ['127.0.0.1:55432:5432']
+    tmpfs: ['/var/lib/postgresql/data']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U syncle -d syncle_test']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: syncle
+      MYSQL_DATABASE: syncle_test
+    command:
+      - --server-id=1
+      - --log-bin=binlog
+      - --binlog-format=ROW
+      - --binlog-row-image=FULL
+      # GTID on, so the GTID-cursor work can be tested against a real server
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --log-replica-updates=ON
+    ports: ['127.0.0.1:53306:3306']
+    tmpfs: ['/var/lib/mysql']
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', '127.0.0.1', '-psyncle']
+      interval: 3s
+      timeout: 5s
+      retries: 40
+
+  mongo:
+    image: mongo:7
+    # Change streams require a replica set, even a single-node one. The port
+    # is identical inside and out on purpose: a replica set advertises its
+    # members' host:port, and clients reconnect to whatever it advertises. With
+    # a remapped port the driver would discover 127.0.0.1:27017 and dial the
+    # wrong place from the host, so keep these two numbers the same.
+    command: ['--replSet', 'rs0', '--bind_ip_all', '--port', '57017']
+    ports: ['127.0.0.1:57017:57017']
+    tmpfs: ['/data/db']
+    healthcheck:
+      test:
+        ['CMD', 'mongosh', '--port', '57017', '--quiet', '--eval', 'db.adminCommand("ping").ok']
+      interval: 3s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    # KEA = keyspace + keyevent notifications for all event classes (CDC source);
+    # appendonly is what makes the spool durable enough to own acked changes
+    command:
+      ['redis-server', '--notify-keyspace-events', 'KEA', '--appendonly', 'yes']
+    ports: ['127.0.0.1:56379:6379']
+    tmpfs: ['/data']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 2s
+      timeout: 3s
+      retries: 30
