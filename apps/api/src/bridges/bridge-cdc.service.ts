@@ -40,11 +40,13 @@ import { BridgeSinkService } from './bridge-sink.service';
 import type { ResolvedBridge } from './bridges.types';
 import {
   CDC_PROVIDERS,
+  backoffMs,
   type CdcChange,
   type CdcProvider,
   type CdcStreamHandle,
 } from './cdc/cdc-provider';
 import { rowMatchesFilters } from './cdc/filter-match';
+import { CdcSpoolService, type SpooledItem } from './cdc/cdc-spool.service';
 
 /** live runtime state for one active CDC stream */
 interface Stream {
@@ -74,6 +76,12 @@ interface Stream {
   maxBatch: number;
   /** the resolved bridge, so a flush needs no extra arguments */
   bridge: ResolvedBridge;
+  /** changes go through the durable spool instead of straight to the sink */
+  spooled: boolean;
+  /** set to stop the spool consumer loop */
+  consumerStop: boolean;
+  /** the running consumer, awaited on teardown so it exits cleanly */
+  consumer: Promise<void> | null;
 }
 
 /** one change held in the pending batch */
@@ -108,6 +116,7 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
     private readonly pool: AdapterPoolService,
     private readonly sink: BridgeSinkService,
     private readonly jobs: BridgeJobService,
+    private readonly spool: CdcSpoolService,
     @Inject(CDC_PROVIDERS) providers: CdcProvider[],
   ) {
     for (const p of providers) this.providers.set(p.engine, p);
@@ -244,6 +253,8 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
     await stream.pending.catch(() => undefined);
     this.streams.delete(bridgeId);
     if (stream.timer) clearTimeout(stream.timer);
+    stream.consumerStop = true;
+    await stream.consumer?.catch(() => undefined);
     // buffered-but-undelivered changes were never acked, so they would replay
     // on resume anyway; flushing here just avoids the needless repeat
     await this.flush(bridgeId, stream).catch(() => undefined);
@@ -286,6 +297,9 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
           ? Math.max(1, runtimeConfig.cdcBatchSize)
           : Math.max(1, bridge.delivery.batchSize),
       bridge,
+      spooled: runtimeConfig.cdcSpool,
+      consumerStop: false,
+      consumer: null,
     };
     this.streams.set(bridgeId, stream);
 
@@ -316,6 +330,8 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
     }
     // the provider may have already begun emitting, only replace the placeholder
     stream.handle = handle;
+    // the spool consumer runs alongside the reader, draining to the destination
+    if (stream.spooled) this.startConsumer(bridgeId, stream);
   }
 
   /** the source's primary-key columns (best-effort), cached on the stream */
@@ -479,6 +495,12 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
 
     const rows = items.map((i) => i.row);
     const lastCursor = items[items.length - 1]!.change.cursor;
+
+    if (stream.spooled) {
+      await this.spoolBatch(bridgeId, stream, items, lastCursor);
+      return;
+    }
+
     const seq = stream.seq;
     const now = new Date().toISOString();
     const pk = stream.primaryKey;
@@ -568,6 +590,220 @@ export class BridgeCdcService implements OnModuleInit, OnModuleDestroy {
         await this.teardown(bridgeId).catch(() => undefined);
         await this.jobs.finalize(stream.jobId, 'failed', message).catch(() => undefined);
       }
+    }
+  }
+
+  /**
+   * Hand a batch to the durable spool and checkpoint the SOURCE against it.
+   *
+   * This is the point of the spool: once the changes are durably in Redis the
+   * source's log may advance, so a slow or unreachable destination can no
+   * longer pin WAL on the production database. The destination is caught up
+   * separately by the consumer.
+   */
+  private async spoolBatch(
+    bridgeId: string,
+    stream: Stream,
+    items: Buffered[],
+    lastCursor: string,
+  ): Promise<void> {
+    // bounded: an unbounded spool would just move the unbounded growth from
+    // the source's WAL into Redis. Blocking here propagates backpressure all
+    // the way back to the reader, which is what we want when the destination
+    // cannot keep up.
+    while (this.streams.get(bridgeId) === stream) {
+      let depth: number;
+      try {
+        depth = await this.spool.depth(bridgeId);
+      } catch {
+        break; // depth is only advisory; a failed append below is the real guard
+      }
+      if (depth < runtimeConfig.cdcSpoolMax) break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    if (this.streams.get(bridgeId) !== stream) return;
+
+    const entries = items.map((i) => ({
+      op: i.change.op,
+      row: i.row,
+      cursor: i.change.cursor,
+    }));
+
+    // the cursor may only advance once the spool has the changes, so a failed
+    // append must never checkpoint. retry briefly, then stop the stream: the
+    // source still holds everything after the last ack, so a restart replays
+    // it and nothing is lost
+    let appended = false;
+    for (let attempt = 0; attempt < 3 && !appended; attempt++) {
+      try {
+        await this.spool.append(bridgeId, entries);
+        appended = true;
+      } catch (err) {
+        if (attempt === 2) {
+          const message = (err as Error).message;
+          this.logger.error(
+            `CDC ${bridgeId}: could not write to the spool, stopping without ` +
+              `advancing the cursor so nothing is lost: ${message}`,
+          );
+          await this.jobs
+            .finalize(stream.jobId, 'failed', `Spool unavailable: ${message}`)
+            .catch(() => undefined);
+          setImmediate(() => void this.teardown(bridgeId).catch(() => undefined));
+          return;
+        }
+        await new Promise((r) => setTimeout(r, backoffMs(attempt)));
+      }
+    }
+
+    stream.watermark = lastCursor;
+    try {
+      await this.prisma.bridgeJob.update({
+        where: { id: stream.jobId },
+        data: { cursorJson: JSON.stringify({ cursor: lastCursor }) },
+      });
+      await stream.handle.ack?.(lastCursor);
+    } catch (err) {
+      // the changes are safely spooled; a missed checkpoint only means the
+      // source replays them, which the watermark dedupe absorbs
+      this.logger.warn(
+        `CDC ${bridgeId}: spooled but could not checkpoint: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  /**
+   * Split spooled items into runs that can each go out as ONE delivery: the
+   * same operation throughout, and no repeated key — a multi-row upsert cannot
+   * touch the same row twice.
+   */
+  private deliverableRuns(items: SpooledItem[], pk: string[] | null): SpooledItem[][] {
+    const runs: SpooledItem[][] = [];
+    let current: SpooledItem[] = [];
+    let currentOp: string | null = null;
+    let seen = new Set<string>();
+
+    for (const item of items) {
+      const sig = pk?.length
+        ? JSON.stringify(pk.map((c) => item.entry.row[c]))
+        : null;
+      const breaks =
+        current.length > 0 &&
+        (currentOp !== item.entry.op || (sig !== null && seen.has(sig)));
+      if (breaks) {
+        runs.push(current);
+        current = [];
+        seen = new Set();
+      }
+      current.push(item);
+      currentOp = item.entry.op;
+      if (sig !== null) seen.add(sig);
+    }
+    if (current.length > 0) runs.push(current);
+    return runs;
+  }
+
+  /**
+   * Drain the spool into the destination. Entries are trimmed only after they
+   * have been delivered (or recorded as failed), so a crash redelivers them —
+   * at-least-once, absorbed by the idempotent writes.
+   */
+  private startConsumer(bridgeId: string, stream: Stream): void {
+    stream.consumer = (async () => {
+      while (!stream.consumerStop) {
+        let items: SpooledItem[];
+        try {
+          items = await this.spool.read(bridgeId, stream.maxBatch);
+        } catch (err) {
+          this.logger.warn(
+            `CDC ${bridgeId}: spool read failed: ${(err as Error).message}`,
+          );
+          await new Promise((r) => setTimeout(r, 500));
+          continue;
+        }
+        if (items.length === 0) {
+          await new Promise((r) =>
+            setTimeout(r, Math.max(10, runtimeConfig.cdcLingerMs)),
+          );
+          continue;
+        }
+
+        for (const run of this.deliverableRuns(items, stream.primaryKey)) {
+          if (stream.consumerStop) return;
+          const aborted = await this.deliverSpooled(bridgeId, stream, run);
+          if (aborted) return;
+        }
+      }
+    })().catch((err) => {
+      this.logger.error(
+        `CDC ${bridgeId}: spool consumer stopped: ${(err as Error).message}`,
+      );
+    });
+  }
+
+  /** deliver one run, record it, and trim it from the spool. true = stop */
+  private async deliverSpooled(
+    bridgeId: string,
+    stream: Stream,
+    run: SpooledItem[],
+  ): Promise<boolean> {
+    const bridge = stream.bridge;
+    if (bridge.source.kind !== 'table') return true;
+
+    const rows = run.map((i) => i.entry.row);
+    const op = run[0]!.entry.op;
+    const lastId = run[run.length - 1]!.id;
+    const seq = stream.seq;
+    const pk = stream.primaryKey;
+    const rowKeys = pk?.length
+      ? run.map((i) => (pk.length === 1 ? i.entry.row[pk[0]!] : pk.map((c) => i.entry.row[c])))
+      : null;
+    const idem =
+      bridge.destination.kind === 'http' && bridge.destination.idempotency
+        ? `${stream.jobId}:${run[run.length - 1]!.entry.cursor}`
+        : undefined;
+
+    try {
+      const { outcome } = await this.sink.deliver(
+        bridge,
+        rows,
+        {
+          table: bridge.source.table,
+          now: new Date().toISOString(),
+          startIndex: seq,
+          op,
+        },
+        new AbortController().signal,
+        idem,
+      );
+      await this.jobs.recordDelivery(
+        stream.jobId,
+        { sequence: seq, rowIndex: seq, rowCount: rows.length, rowKeys },
+        outcome,
+      );
+      if (outcome.status === 'failed' && bridge.delivery.onError === 'abort') {
+        this.logger.warn(`CDC ${bridgeId}: pausing after a failed delivery (onError=abort)`);
+        await this.jobs
+          .finalize(stream.jobId, 'paused', 'Paused after a failed delivery (onError=abort).')
+          .catch(() => undefined);
+        // leave the run in the spool so a restart retries it
+        setImmediate(() => void this.teardown(bridgeId).catch(() => undefined));
+        return true;
+      }
+      stream.seq = seq + 1;
+      // delivered: the spool may forget it. the head advances, so reads stay
+      // cheap however many millions have passed through
+      await this.spool.trimThrough(bridgeId, lastId);
+      await this.prisma.bridgeJob
+        .update({ where: { id: stream.jobId }, data: { cursorOffset: stream.seq } })
+        .catch(() => undefined);
+      return false;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`CDC ${bridgeId}: spooled delivery failed: ${message}`);
+      // do NOT trim: the entries stay so the next pass retries them. back off
+      // so a persistently broken destination does not spin
+      await new Promise((r) => setTimeout(r, 1_000));
+      return false;
     }
   }
 

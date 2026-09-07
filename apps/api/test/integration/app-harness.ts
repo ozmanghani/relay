@@ -145,3 +145,44 @@ export async function destRows(
     }
   });
 }
+
+/**
+ * Row count in the destination. `destRows` pages through `browse`, which is
+ * capped (5000 by default), so anything larger must be counted in the engine.
+ */
+export async function destCount(
+  engine: 'postgres' | 'mysql',
+  table: string,
+): Promise<number> {
+  return withAdapter(engine, async (a) => {
+    try {
+      const res = await a.query(`SELECT COUNT(*) AS n FROM "${table}"`.replace(
+        /"/g,
+        engine === 'mysql' ? '`' : '"',
+      ));
+      const row = res.rows[0] as { n?: unknown };
+      return Number(row?.n ?? 0);
+    } catch {
+      return 0; // table not created yet
+    }
+  });
+}
+
+/** distinct ids in the destination, to prove exactly-once at volume */
+export async function destDistinctIds(
+  engine: 'postgres' | 'mysql',
+  table: string,
+): Promise<{ distinct: number; min: number; max: number }> {
+  return withAdapter(engine, async (a) => {
+    const q = engine === 'mysql' ? '`' : '"';
+    const res = await a.query(
+      `SELECT COUNT(DISTINCT id) AS d, MIN(id) AS lo, MAX(id) AS hi FROM ${q}${table}${q}`,
+    );
+    const row = res.rows[0] as { d?: unknown; lo?: unknown; hi?: unknown };
+    return {
+      distinct: Number(row?.d ?? 0),
+      min: Number(row?.lo ?? 0),
+      max: Number(row?.hi ?? 0),
+    };
+  });
+}
