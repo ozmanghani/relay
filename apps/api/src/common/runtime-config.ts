@@ -43,6 +43,25 @@ export const runtimeConfig = {
     process.env.SYNCLE_JOB_CONCURRENCY ?? process.env.SYNCLE_HOOK_CONCURRENCY ?? 5,
   ),
   /**
+   * CDC micro-batching. A change stream delivered one row at a time pays a
+   * delivery, a delivery record, a cursor write and a source ack per row, so
+   * round trips — not the database — set the ceiling. Consecutive changes are
+   * grouped into one delivery instead.
+   *
+   * This applies to DATABASE destinations only, where a batch is invisible:
+   * writes are idempotent upserts keyed by column, so the result is identical.
+   * HTTP destinations keep honouring `delivery.batchSize`, because there the
+   * batch size is the payload shape and changing it would change what
+   * receivers see.
+   *
+   * Batching widens the at-least-once replay window to at most one batch: a
+   * crash mid-batch replays that batch, which the watermark dedupe and
+   * idempotent writes absorb.
+   */
+  cdcBatchSize: Number(process.env.SYNCLE_CDC_BATCH_SIZE ?? 200),
+  /** how long a partial batch waits for more changes before being flushed */
+  cdcLingerMs: Number(process.env.SYNCLE_CDC_LINGER_MS ?? 50),
+  /**
    * when true, HTTP destinations may not resolve to loopback/private/link-local
    * addresses (SSRF guard for network-exposed deployments). off by default —
    * Syncle is local-first and posting to localhost services is a primary use.
