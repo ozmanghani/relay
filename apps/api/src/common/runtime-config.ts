@@ -56,9 +56,27 @@ export const runtimeConfig = {
    *
    * Batching widens the at-least-once replay window to at most one batch: a
    * crash mid-batch replays that batch, which the watermark dedupe and
-   * idempotent writes absorb.
+   * idempotent writes absorb. That is the cost of a large batch, and the reason
+   * the default is not larger still.
+   *
+   * 100,000 is measured, not guessed, and one value serves every engine tested.
+   * Median rows/sec over FIVE runs of 1,000,000 rows each:
+   *
+   *              100,000    200,000    300,000
+   *   Postgres    83,759     82,604     49,761
+   *   MySQL      106,564    100,341          -
+   *
+   * Two findings worth keeping. 300,000 falls off a cliff — all five runs came
+   * in around 50k, and an earlier three-run sample had put it at 78k, so the
+   * repetition mattered. And 20,000 (a previous default) measured 54,345 on
+   * Postgres: too small hurts far more than too large.
+   *
+   * It also holds up on a small machine. Under a 512MB heap the curve stays
+   * flat (68,776 at 20,000, 73,910 at 100,000, 74,608 at 300,000) with no
+   * failures, because what actually bounds memory here is the byte budget
+   * below, not the row count.
    */
-  cdcBatchSize: Number(process.env.SYNCLE_CDC_BATCH_SIZE ?? 20_000),
+  cdcBatchSize: Number(process.env.SYNCLE_CDC_BATCH_SIZE ?? 100_000),
   /**
    * Ceiling on the bytes held in one batch. A row cap alone is unsafe: 20,000
    * narrow rows is a few megabytes, but 20,000 wide ones could be gigabytes.

@@ -74,7 +74,10 @@ services:
     # wrong place from the host, so keep these two numbers the same.
     command: ['--replSet', 'rs0', '--bind_ip_all', '--port', '57017']
     ports: ['127.0.0.1:57017:57017']
-    tmpfs: ['/data/db']
+    # NOT tmpfs, unlike the others. A RAM-backed data directory cannot hold a
+    # million documents plus their indexes, and the container gets OOM-killed
+    # part way through a benchmark. The volume is still disposable.
+    volumes: ['syncle-test-mongo:/data/db']
     healthcheck:
       test:
         ['CMD', 'mongosh', '--port', '57017', '--quiet', '--eval', 'db.adminCommand("ping").ok']
@@ -95,3 +98,6 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+
+volumes:
+  syncle-test-mongo:

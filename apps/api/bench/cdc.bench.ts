@@ -44,13 +44,21 @@ let app: AppHandle;
 let mongo: MongoClient | null = null;
 const results: BenchResult[] = [];
 
-/** exact document count, held open so counting does not distort the timing */
-async function mongoCount(collection: string): Promise<number> {
+/**
+ * Document count. `exact` runs countDocuments, which is a COLLECTION SCAN —
+ * fine once at the end, ruinous as a progress check: polling it every 100ms
+ * against a growing collection had MongoDB scanning hundreds of thousands of
+ * documents continuously while it was being measured, which distorts the
+ * result and contributed to an OOM. Progress uses the O(1) metadata estimate
+ * instead, and the exact count is taken once, at the end.
+ */
+async function mongoCount(collection: string, exact = false): Promise<number> {
   const conn = TEST_CONNECTIONS.mongodb!;
   mongo ??= await new MongoClient(
     `mongodb://${conn.host}:${conn.port}/?directConnection=true`,
   ).connect();
-  return mongo.db(conn.database).collection(collection).countDocuments();
+  const c = mongo.db(conn.database).collection(collection);
+  return exact ? c.countDocuments() : c.estimatedDocumentCount();
 }
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -123,11 +131,7 @@ async function measure(source: Engine, dest: Dest, label: string): Promise<void>
   // estimated — so waiting for it to equal the row count never succeeds.
   const landedCount = async (): Promise<number> => {
     try {
-      if (dest === 'mongodb') {
-        // browse() reports estimatedDocumentCount when unfiltered, which lags
-        // reality; countDocuments is the exact one
-        return await mongoCount(s.destTable);
-      }
+      if (dest === 'mongodb') return await mongoCount(s.destTable);
       const q = dest.startsWith('mysql') ? '`' : '"';
       const res = await probe.query(`SELECT COUNT(*) AS c FROM ${q}${s.destTable}${q}`);
       return Number(Object.values(res.rows[0] ?? {})[0] ?? 0);
@@ -153,14 +157,17 @@ async function measure(source: Engine, dest: Dest, label: string): Promise<void>
   await waitFor(
     `${ROWS} rows to reach ${dest}`,
     async () => ((await landedCount()) === ROWS ? true : null),
-    { timeoutMs: 3_000_000, intervalMs: 100 },
+    // Mongo's estimate updates lazily, and every poll is a round trip; a
+    // slower cadence measures the pipeline rather than the polling
+    { timeoutMs: 3_000_000, intervalMs: dest === 'mongodb' ? 1_000 : 100 },
   );
   const ms = Math.round(performance.now() - started);
   const usage = sampler.stop();
   if (watch) clearInterval(watch);
 
   // a throughput number is worthless if the data is wrong, so verify first
-  const landed = await landedCount();
+  const landed =
+    dest === 'mongodb' ? await mongoCount(s.destTable, true) : await landedCount();
   await probe.close().catch(() => undefined);
   if (landed !== ROWS) throw new Error(`expected ${ROWS} rows, found ${landed}`);
 
